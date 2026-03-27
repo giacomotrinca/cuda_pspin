@@ -1,0 +1,9 @@
+bin/
+*.o
+*.d
+*.out
+*.log
+*.dat
+*.swp
+*~
+.vscode/
