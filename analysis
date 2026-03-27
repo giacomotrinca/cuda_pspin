@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# Default parameters
+SIZE=24
+NREP=4
+LABEL=""
+DATADIR=""
+
+# Parse arguments
+for arg in "$@"; do
+    case "$arg" in
+        --size=*)    SIZE="${arg#*=}" ;;
+        --nrep=*)    NREP="${arg#*=}" ;;
+        --label=*)   LABEL="${arg#*=}" ;;
+        --datadir=*) DATADIR="${arg#*=}" ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "  --size=N      Number of spins (default: $SIZE)"
+            echo "  --nrep=R      Number of replicas (default: $NREP)"
+            echo "  --label=L     Sample label"
+            echo "  --datadir=D   Override data directory"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+echo "=== analysis launcher ==="
+echo "N=$SIZE  nrep=$NREP"
+echo ""
+
+EXTRA=""
+if [ -n "$DATADIR" ]; then
+    EXTRA="-datadir $DATADIR"
+fi
+
+LABEL_FLAG=""
+if [ -n "$LABEL" ]; then
+    LABEL_FLAG="-label $LABEL"
+    echo "Data dir: data/N${SIZE}_NR${NREP}_S${LABEL}"
+else
+    echo "Data dir: data/N${SIZE}_NR${NREP}"
+fi
+
+exec ./bin/analysis -N "$SIZE" -nrep "$NREP" $LABEL_FLAG $EXTRA

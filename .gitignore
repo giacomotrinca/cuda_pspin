@@ -6,4 +6,8 @@ bin/
 *.dat
 *.swp
 *~
+data/
+*.png
+*.jpg
+*.pdf
 .vscode/

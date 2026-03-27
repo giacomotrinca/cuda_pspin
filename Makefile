@@ -1,4 +1,4 @@
-# Makefile for p-Spin 2+4 Complex Spherical MC (CUDA)
+# Makefile for p-Spin 2+4 Complex Spherical MC (CUDA) + Analysis (C++)
 # Target: Tesla V100S, CUDA 11.4
 
 # Compilers
@@ -12,37 +12,48 @@ LIBDIR     := lib
 BINDIR     := bin
 OBJDIR     := obj
 
-# Target
-TARGET     := $(BINDIR)/pspin24
+# Targets
+MC_TARGET  := $(BINDIR)/pspin24
+ANA_TARGET := $(BINDIR)/analysis
 
 # CUDA architecture: V100S = sm_70
 CUDA_ARCH  := -gencode arch=compute_70,code=sm_70
 
 # Flags
-NVCCFLAGS  := -std=c++14 $(CUDA_ARCH) -O2 -I$(INCDIR) --expt-relaxed-constexpr
+NVCCFLAGS  := -std=c++14 $(CUDA_ARCH) -O3 --use_fast_math -I$(INCDIR) --expt-relaxed-constexpr
+CXXFLAGS   := -std=c++14 -O3 -Wall
 LDFLAGS    := -lcurand -lm
 
 # Debug build
 ifdef DEBUG
 NVCCFLAGS  += -g -G -DDEBUG -lineinfo
+CXXFLAGS   += -g -DDEBUG
 else
 NVCCFLAGS  += -DNDEBUG
+CXXFLAGS   += -DNDEBUG
 endif
 
-# Sources and objects
-SOURCES    := $(wildcard $(SRCDIR)/*.cu)
-OBJECTS    := $(patsubst $(SRCDIR)/%.cu,$(OBJDIR)/%.o,$(SOURCES))
+# MC sources and objects (CUDA)
+MC_SOURCES := $(filter-out $(SRCDIR)/analysis.cpp, $(wildcard $(SRCDIR)/*.cu))
+MC_OBJECTS := $(patsubst $(SRCDIR)/%.cu,$(OBJDIR)/%.o,$(MC_SOURCES))
 
 # Rules
-.PHONY: all clean directories
+.PHONY: all mc analysis clean directories
 
-all: directories $(TARGET)
+all: mc analysis
+
+mc: directories $(MC_TARGET)
+
+analysis: directories $(ANA_TARGET)
 
 directories:
 	@mkdir -p $(BINDIR) $(OBJDIR)
 
-$(TARGET): $(OBJECTS)
+$(MC_TARGET): $(MC_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(ANA_TARGET): $(SRCDIR)/analysis.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $< -lm
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cu
 	$(NVCC) $(NVCCFLAGS) -c -o $@ $<

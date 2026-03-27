@@ -112,43 +112,4 @@ void init_spins_uniform(cuDoubleComplex* d_spins, int N, unsigned long long seed
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-// Device function: propose pair rotation preserving |a_i|^2 + |a_j|^2
-__device__ void propose_pair_rotation(
-    cuDoubleComplex a_i, cuDoubleComplex a_j,
-    double delta,
-    curandStatePhilox4_32_10_t* rng_state,
-    cuDoubleComplex* a_i_new, cuDoubleComplex* a_j_new
-) {
-    // Rotation in the 2D complex subspace spanned by (a_i, a_j)
-    // preserves |a_i|^2 + |a_j|^2, hence the spherical constraint.
-    //
-    // We use a U(2) rotation parameterized by a small angle:
-    //   (a_i', a_j') = (cos(theta)*a_i + e^{i*phi}*sin(theta)*a_j,
-    //                   -e^{-i*phi}*sin(theta)*a_i + cos(theta)*a_j)
-
-    float4 rnd = curand_uniform4(rng_state);
-    double theta = delta * (rnd.x - 0.5);  // small angle
-    double phi = 2.0 * M_PI * rnd.y;       // random phase
-
-    double ct = cos(theta);
-    double st = sin(theta);
-    double cp = cos(phi);
-    double sp = sin(phi);
-
-    // e^{i*phi} = cp + i*sp
-    // New a_i = ct * a_i + (cp + i*sp) * st * a_j
-    cuDoubleComplex eiphi = make_cuDoubleComplex(cp, sp);
-    cuDoubleComplex emiphi = make_cuDoubleComplex(cp, -sp);
-
-    // a_i_new = ct * a_i + st * e^{iphi} * a_j
-    cuDoubleComplex term1 = make_cuDoubleComplex(ct * cuCreal(a_i), ct * cuCimag(a_i));
-    cuDoubleComplex rot_aj = cuCmul(eiphi, a_j);
-    cuDoubleComplex term2 = make_cuDoubleComplex(st * cuCreal(rot_aj), st * cuCimag(rot_aj));
-    *a_i_new = cuCadd(term1, term2);
-
-    // a_j_new = -st * e^{-iphi} * a_i + ct * a_j
-    cuDoubleComplex rot_ai = cuCmul(emiphi, a_i);
-    cuDoubleComplex term3 = make_cuDoubleComplex(-st * cuCreal(rot_ai), -st * cuCimag(rot_ai));
-    cuDoubleComplex term4 = make_cuDoubleComplex(ct * cuCreal(a_j), ct * cuCimag(a_j));
-    *a_j_new = cuCadd(term3, term4);
-}
+// propose_pair_rotation is now inline in spins.h
