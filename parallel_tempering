@@ -4,16 +4,17 @@
 SIZE=18
 TMAX=2.0
 TMIN=0.01
-NTEMP=36
+NT=20
 J=1.0
 ITER=14
 SEED=$RANDOM
 NREP=2
+PT_FREQ=1
 SAVE_FREQ=64
 SHOW_OUTPUT=0
 LABEL=""
 DEV=0
-FMC=1 # 0: no FMC, 1: comb-like, 2: uniform
+FMC=1
 GAMMA=""
 
 # Parse arguments
@@ -22,11 +23,12 @@ for arg in "$@"; do
         --size=*)      SIZE="${arg#*=}" ;;
         --tmax=*)      TMAX="${arg#*=}" ;;
         --tmin=*)      TMIN="${arg#*=}" ;;
-        --ntemp=*)     NTEMP="${arg#*=}" ;;
+        --nt=*)        NT="${arg#*=}" ;;
         --J=*)         J="${arg#*=}" ;;
         --iter=*)      ITER="${arg#*=}" ;;
         --seed=*)      SEED="${arg#*=}" ;;
         --nrep=*)      NREP="${arg#*=}" ;;
+        --pt_freq=*)   PT_FREQ="${arg#*=}" ;;
         --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
         --label=*)     LABEL="${arg#*=}" ;;
         --dev=*)       DEV="${arg#*=}" ;;
@@ -35,20 +37,21 @@ for arg in "$@"; do
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
-            echo "  --size=N       Number of spins (default: $SIZE)"
-            echo "  --tmax=T       Max temperature (default: $TMAX)"
-            echo "  --tmin=T       Min temperature (default: $TMIN)"
-            echo "  --ntemp=N      Number of temperature steps (default: $NTEMP)"
-            echo "  --J=J          Coupling scale (default: $J)"
-            echo "  --iter=K       Sweeps per temp = 2^K (default: $ITER)"
-            echo "  --seed=S       RNG seed (default: random)"
-            echo "  --nrep=R       Number of replicas (default: $NREP)"
-            echo "  --save_freq=K  Save every K iterations (default: $SAVE_FREQ)"
-            echo "  --label=L      Sample label (default: none)"
-            echo "  --dev=D        GPU device index (default: all visible)"
-            echo "  --fmc=M        FMC mode: 0=FC, 1=comb, 2=uniform (default: 0)"
-            echo "  --gamma=G      FMC gamma (default: auto)"
-            echo "  --show-output=L Print progress: 0=silent 1=temp 2=sweeps (default: $SHOW_OUTPUT)"
+            echo "  --size=N        Number of spins (default: $SIZE)"
+            echo "  --tmax=T        Max temperature (default: $TMAX)"
+            echo "  --tmin=T        Min temperature (default: $TMIN)"
+            echo "  --nt=N          Number of temperatures (default: $NT)"
+            echo "  --J=J           Coupling scale (default: $J)"
+            echo "  --iter=K        MC sweeps = 2^K (default: $ITER)"
+            echo "  --seed=S        RNG seed (default: random)"
+            echo "  --nrep=R        Independent copies per temperature (default: $NREP)"
+            echo "  --pt_freq=P     Propose exchanges every P sweeps (default: $PT_FREQ)"
+            echo "  --save_freq=K   Save every K sweeps (default: $SAVE_FREQ)"
+            echo "  --label=L       Sample label (default: none)"
+            echo "  --dev=D         GPU device index (default: $DEV)"
+            echo "  --fmc=M         FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
+            echo "  --gamma=G       FMC gamma (default: auto)"
+            echo "  --show-output=L Verbosity: 0=silent 1=compact 2=detailed (default: $SHOW_OUTPUT)"
             exit 0
             ;;
         *)
@@ -59,19 +62,22 @@ for arg in "$@"; do
 done
 
 # Compute 2^ITER
-SWEEPS=$((1 << ITER))
+MC_ITER=$((1 << ITER))
+TOTAL_REPLICAS=$((NT * NREP))
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
-echo "║        p-Spin 2+4 :: Simulated Annealing         ║"
+echo "║         p-Spin 2+4 :: Parallel Tempering         ║"
 echo "╚══════════════════════════════════════════════════╝"
 printf "  %-22s %s\n" "N" "$SIZE"
-printf "  %-22s %s\n" "nrep" "$NREP"
+printf "  %-22s %s\n" "NT" "$NT"
+printf "  %-22s %s\n" "nrep/T" "$NREP"
+printf "  %-22s %s\n" "total replicas" "$TOTAL_REPLICAS"
 printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
-printf "  %-22s %s\n" "ntemp" "$NTEMP"
 printf "  %-22s %s\n" "J" "$J"
-printf "  %-22s %s  (2^%s)\n" "sweeps/temp" "$SWEEPS" "$ITER"
+printf "  %-22s %s  (2^%s)\n" "sweeps" "$MC_ITER" "$ITER"
+printf "  %-22s %s\n" "pt_freq" "$PT_FREQ"
 printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
 printf "  %-22s %s\n" "seed" "$SEED"
 if [ -n "$DEV" ]; then printf "  %-22s %s\n" "GPU device" "$DEV"; fi
@@ -103,4 +109,13 @@ if [ -n "$GAMMA" ]; then
     GAMMA_FLAG="-gamma $GAMMA"
 fi
 
-./bin/simulated_annealing -N "$SIZE" -Tmax "$TMAX" -Tmin "$TMIN" -ntemp "$NTEMP" -J "$J" -iter "$ITER" -seed "$SEED" -nrep "$NREP" -save_freq "$SAVE_FREQ" $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG $GAMMA_FLAG
+./bin/parallel_tempering \
+    -N "$SIZE" \
+    -Tmax "$TMAX" -Tmin "$TMIN" -NT "$NT" \
+    -J "$J" \
+    -iter "$MC_ITER" \
+    -seed "$SEED" \
+    -nrep "$NREP" \
+    -pt_freq "$PT_FREQ" \
+    -save_freq "$SAVE_FREQ" \
+    $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG $GAMMA_FLAG

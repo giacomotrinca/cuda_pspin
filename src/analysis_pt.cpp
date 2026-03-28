@@ -1,14 +1,15 @@
-// Analysis of simulated annealing data.
+// Analysis of parallel tempering data.
 //
-// Reads energy_accept.txt from data/SA_N{N}_NR{nrep}_S{0,1,...} directories.
+// Reads energy_accept.txt and exchanges.txt from data/PT_N{N}_NT{NT}_NR{nrep}_S{0,1,...}.
 // For each temperature, uses the second half of the time series to compute
 // mean energy, acceptance, and specific heat (jackknife errors over samples).
 //
-// Output directory: analysis/SA_N{N}_NR{nrep}/
+// Output directory: analysis/PT_N{N}_NT{NT}_NR{nrep}/
 //   equilibrium_data_nr{r}.dat  — per-replica results
 //   equilibrium_data_mean.dat   — replica-averaged results
+//   exchange_rates.dat          — exchange acceptance rates between adjacent temperatures
 //
-// Columns:
+// Columns (equilibrium_data):
 //   Temperature  Energy_mean  Energy_err_jk  Acceptance_mean  Acceptance_err_jk  Cv  Cv_err_jk
 //
 // Specific heat: Cv = N * (<e^2> - <e>^2) / T^2,  e = E/N.
@@ -24,30 +25,47 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-// One measurement row: T, sweep, and per-replica E/N and acceptance
+// One measurement row: sweep, Tidx, T, and per-replica E/N and acceptance
 struct Row {
-    double T;
     int sweep;
-    std::vector<double> energy; // E/N per replica
-    std::vector<double> acc;    // acceptance per replica
+    int tidx;
+    double T;
+    std::vector<double> energy;
+    std::vector<double> acc;
 };
 
-// Per-temperature data: all rows at a given T for one sample
+// One exchange measurement row
+struct ExRow {
+    int sweep;
+    int tidx;
+    double T_high, T_low;
+    long long n_acc, n_prop;
+    double rate;
+};
+
+// Per-temperature data for one sample
 struct TempBlock {
     double T;
+    int tidx;
     std::vector<int> sweeps;
     std::vector<std::vector<double>> energy; // [measurement][replica]
     std::vector<std::vector<double>> acc;
 };
 
-// Read energy_accept.txt, return rows grouped by temperature (in order of appearance)
-static std::vector<TempBlock> read_sa_data(const char* datadir, int nrep) {
+// Per-temperature-pair exchange data for one sample
+struct ExBlock {
+    int tidx;
+    double T_high, T_low;
+    long long total_acc, total_prop;
+};
+
+// Read energy_accept.txt, return grouped by temperature index
+static std::vector<TempBlock> read_pt_data(const char* datadir, int nrep) {
     char infile[512];
     snprintf(infile, sizeof(infile), "%s/energy_accept.txt", datadir);
     FILE* fin = fopen(infile, "r");
     if (!fin) return {};
 
-    // Parse all rows
     std::vector<Row> rows;
     char line[4096];
     while (fgets(line, sizeof(line), fin)) {
@@ -58,11 +76,15 @@ static std::vector<TempBlock> read_sa_data(const char* datadir, int nrep) {
 
         char* tok = strtok(line, " \t\n");
         if (!tok) continue;
-        row.T = atof(tok);
+        row.sweep = atoi(tok);
 
         tok = strtok(nullptr, " \t\n");
         if (!tok) continue;
-        row.sweep = atoi(tok);
+        row.tidx = atoi(tok);
+
+        tok = strtok(nullptr, " \t\n");
+        if (!tok) continue;
+        row.T = atof(tok);
 
         bool ok = true;
         for (int r = 0; r < nrep; r++) {
@@ -78,18 +100,19 @@ static std::vector<TempBlock> read_sa_data(const char* datadir, int nrep) {
     }
     fclose(fin);
 
-    // Group by temperature in order of appearance
+    // Group by temperature index
+    std::map<int, int> tidx_to_block;
     std::vector<TempBlock> blocks;
-    std::map<double, int> temp_idx; // T -> index in blocks
 
     for (auto& row : rows) {
-        auto it = temp_idx.find(row.T);
+        auto it = tidx_to_block.find(row.tidx);
         int idx;
-        if (it == temp_idx.end()) {
+        if (it == tidx_to_block.end()) {
             idx = (int)blocks.size();
-            temp_idx[row.T] = idx;
+            tidx_to_block[row.tidx] = idx;
             TempBlock tb;
             tb.T = row.T;
+            tb.tidx = row.tidx;
             blocks.push_back(tb);
         } else {
             idx = it->second;
@@ -98,17 +121,63 @@ static std::vector<TempBlock> read_sa_data(const char* datadir, int nrep) {
         blocks[idx].energy.push_back(row.energy);
         blocks[idx].acc.push_back(row.acc);
     }
+
+    // Sort by temperature index
+    std::sort(blocks.begin(), blocks.end(),
+              [](const TempBlock& a, const TempBlock& b) { return a.tidx < b.tidx; });
+
     return blocks;
 }
 
-// Find all sample directories matching data/SA_N{N}_NR{nrep}_S*
-static std::vector<int> find_samples(int N, int nrep) {
+// Read exchanges.txt, return cumulative exchange stats per temperature pair
+static std::vector<ExBlock> read_exchange_data(const char* datadir) {
+    char infile[512];
+    snprintf(infile, sizeof(infile), "%s/exchanges.txt", datadir);
+    FILE* fin = fopen(infile, "r");
+    if (!fin) return {};
+
+    std::map<int, ExBlock> exmap;
+    char line[1024];
+    while (fgets(line, sizeof(line), fin)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        int sweep, tidx;
+        double T_high, T_low, rate;
+        long long n_acc, n_prop;
+        if (sscanf(line, "%d %d %lf %lf %lld %lld %lf",
+                   &sweep, &tidx, &T_high, &T_low, &n_acc, &n_prop, &rate) < 7)
+            continue;
+
+        auto it = exmap.find(tidx);
+        if (it == exmap.end()) {
+            ExBlock eb;
+            eb.tidx = tidx;
+            eb.T_high = T_high;
+            eb.T_low = T_low;
+            eb.total_acc = n_acc;
+            eb.total_prop = n_prop;
+            exmap[tidx] = eb;
+        } else {
+            it->second.total_acc += n_acc;
+            it->second.total_prop += n_prop;
+        }
+    }
+    fclose(fin);
+
+    std::vector<ExBlock> exvec;
+    for (auto& kv : exmap) exvec.push_back(kv.second);
+    std::sort(exvec.begin(), exvec.end(),
+              [](const ExBlock& a, const ExBlock& b) { return a.tidx < b.tidx; });
+    return exvec;
+}
+
+// Find all sample directories matching data/PT_N{N}_NT{NT}_NR{nrep}_S*
+static std::vector<int> find_samples(int N, int NT, int nrep) {
     std::vector<int> labels;
     DIR* dir = opendir("data");
     if (!dir) return labels;
 
     char pat[128];
-    snprintf(pat, sizeof(pat), "SA_N%d_NR%d_S", N, nrep);
+    snprintf(pat, sizeof(pat), "PT_N%d_NT%d_NR%d_S", N, NT, nrep);
     int plen = (int)strlen(pat);
 
     struct dirent* ent;
@@ -116,7 +185,7 @@ static std::vector<int> find_samples(int N, int nrep) {
         if (strncmp(ent->d_name, pat, plen) == 0) {
             int label = atoi(ent->d_name + plen);
             char check[128];
-            snprintf(check, sizeof(check), "SA_N%d_NR%d_S%d", N, nrep, label);
+            snprintf(check, sizeof(check), "PT_N%d_NT%d_NR%d_S%d", N, NT, nrep, label);
             if (strcmp(ent->d_name, check) == 0)
                 labels.push_back(label);
         }
@@ -141,12 +210,11 @@ static void mkdir_p(const char* path) {
 
 // Per-sample, per-temperature observables from second half of time series
 struct SampleObs {
-    double e_mean;  // <e>  (e = E/N)
-    double e2_mean; // <e^2>
-    double a_mean;  // <acceptance>
+    double e_mean;
+    double e2_mean;
+    double a_mean;
 };
 
-// Compute observables from the second half of a TempBlock for one replica
 static SampleObs compute_obs(const TempBlock& tb, int replica) {
     int M = (int)tb.energy.size();
     int start = M / 2;
@@ -164,58 +232,58 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>]\n", prog);
     exit(1);
 }
 
 int main(int argc, char** argv) {
-    int N = 0;
-    int nrep = 1;
+    int N = 0, NT = 0, nrep = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-N") == 0 && i + 1 < argc)
             N = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-NT") == 0 && i + 1 < argc)
+            NT = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nrep") == 0 && i + 1 < argc)
             nrep = atoi(argv[++i]);
         else usage(argv[0]);
     }
-    if (N < 4) usage(argv[0]);
+    if (N < 4 || NT < 2) usage(argv[0]);
 
-    // Find samples
-    auto labels = find_samples(N, nrep);
+    auto labels = find_samples(N, NT, nrep);
     if (labels.empty()) {
-        fprintf(stderr, "No sample directories found for data/SA_N%d_NR%d_S*\n", N, nrep);
+        fprintf(stderr, "No sample directories found for data/PT_N%d_NT%d_NR%d_S*\n", N, NT, nrep);
         return 1;
     }
     int nsamples = (int)labels.size();
 
-    // Output directory
     char outdir[256];
-    snprintf(outdir, sizeof(outdir), "analysis/SA_N%d_NR%d", N, nrep);
+    snprintf(outdir, sizeof(outdir), "analysis/PT_N%d_NT%d_NR%d", N, NT, nrep);
     mkdir_p(outdir);
 
     printf("\n");
     printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║           p-Spin 2+4 :: Analysis (SA)            ║\n");
+    printf("║           p-Spin 2+4 :: Analysis (PT)            ║\n");
     printf("╚══════════════════════════════════════════════════╝\n");
     printf("  %-22s %d\n", "N", N);
+    printf("  %-22s %d\n", "NT", NT);
     printf("  %-22s %d\n", "nrep", nrep);
     printf("  %-22s %d\n", "samples", nsamples);
     printf("  %-22s %s/\n\n", "output", outdir);
 
     // Read all sample data
-    // all_data[sample_idx] = vector of TempBlocks (one per temperature)
     std::vector<std::vector<TempBlock>> all_data(nsamples);
+    std::vector<std::vector<ExBlock>> all_ex(nsamples);
     for (int s = 0; s < nsamples; s++) {
         char sdir[256];
-        snprintf(sdir, sizeof(sdir), "data/SA_N%d_NR%d_S%d", N, nrep, labels[s]);
-        all_data[s] = read_sa_data(sdir, nrep);
-        if (all_data[s].empty()) {
+        snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d", N, NT, nrep, labels[s]);
+        all_data[s] = read_pt_data(sdir, nrep);
+        all_ex[s] = read_exchange_data(sdir);
+        if (all_data[s].empty())
             fprintf(stderr, "Warning: no data in %s\n", sdir);
-        }
     }
 
-    // Use temperature list from first non-empty sample
+    // Use first non-empty sample as reference
     int ref = -1;
     for (int s = 0; s < nsamples; s++) {
         if (!all_data[s].empty()) { ref = s; break; }
@@ -236,13 +304,12 @@ int main(int argc, char** argv) {
         if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); continue; }
 
         fprintf(fout, "# Temperature\tEnergy_mean\tEnergy_err_jk\tAcceptance_mean\tAcceptance_err_jk\tCv\tCv_err_jk\n");
-        fprintf(fout, "# N=%d nrep=%d replica=%d nsamples=%d\n", N, nrep, r, nsamples);
-        fprintf(fout, "# Energy = E/N (as stored). Cv = N*(<e^2>-<e>^2)/T^2. Jackknife over %d samples.\n", nsamples);
+        fprintf(fout, "# N=%d NT=%d nrep=%d replica=%d nsamples=%d\n", N, NT, nrep, r, nsamples);
+        fprintf(fout, "# Energy = E/N. Cv = N*(<e^2>-<e>^2)/T^2. Jackknife over %d samples.\n", nsamples);
 
         for (int ti = 0; ti < ntemps; ti++) {
             double T = all_data[ref][ti].T;
 
-            // Per-sample observables
             std::vector<double> sE(nsamples), sC(nsamples), sA(nsamples);
             for (int s = 0; s < nsamples; s++) {
                 if (ti >= (int)all_data[s].size()) continue;
@@ -252,12 +319,10 @@ int main(int argc, char** argv) {
                 sC[s] = N * (obs.e2_mean - obs.e_mean * obs.e_mean) / (T * T);
             }
 
-            // Full means
             double fE = 0, fA = 0, fC = 0;
             for (int s = 0; s < nsamples; s++) { fE += sE[s]; fA += sA[s]; fC += sC[s]; }
             fE /= nsamples; fA /= nsamples; fC /= nsamples;
 
-            // Jackknife errors
             double jE = 0, jA = 0, jC = 0;
             for (int j = 0; j < nsamples; j++) {
                 double lE = 0, lA = 0, lC = 0;
@@ -291,13 +356,12 @@ int main(int argc, char** argv) {
         if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); return 1; }
 
         fprintf(fout, "# Temperature\tEnergy_mean\tEnergy_err_jk\tAcceptance_mean\tAcceptance_err_jk\tCv\tCv_err_jk\n");
-        fprintf(fout, "# N=%d nrep=%d nsamples=%d\n", N, nrep, nsamples);
+        fprintf(fout, "# N=%d NT=%d nrep=%d nsamples=%d\n", N, NT, nrep, nsamples);
         fprintf(fout, "# Replica-averaged, then jackknife over %d samples. Cv = N*(<e^2>-<e>^2)/T^2.\n", nsamples);
 
         for (int ti = 0; ti < ntemps; ti++) {
             double T = all_data[ref][ti].T;
 
-            // Per-sample: average over replicas
             std::vector<double> smE(nsamples, 0), smA(nsamples, 0), smC(nsamples, 0);
             for (int s = 0; s < nsamples; s++) {
                 if (ti >= (int)all_data[s].size()) continue;
@@ -312,12 +376,10 @@ int main(int argc, char** argv) {
                 smC[s] /= nrep;
             }
 
-            // Full means
             double fE = 0, fA = 0, fC = 0;
             for (int s = 0; s < nsamples; s++) { fE += smE[s]; fA += smA[s]; fC += smC[s]; }
             fE /= nsamples; fA /= nsamples; fC /= nsamples;
 
-            // Jackknife errors
             double jE = 0, jA = 0, jC = 0;
             for (int j = 0; j < nsamples; j++) {
                 double lE = 0, lA = 0, lC = 0;
@@ -336,6 +398,70 @@ int main(int argc, char** argv) {
 
             fprintf(fout, "%.8f\t%.8f\t%.8f\t%.5f\t%.5f\t%.8f\t%.8f\n",
                     T, fE, jE, fA, jA, fC, jC);
+        }
+        fclose(fout);
+        printf("  Written %s\n", outfile);
+    }
+
+    // ================================================================
+    // Exchange rates (averaged over samples)
+    // ================================================================
+    {
+        char outfile[512];
+        snprintf(outfile, sizeof(outfile), "%s/exchange_rates.dat", outdir);
+        FILE* fout = fopen(outfile, "w");
+        if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); return 1; }
+
+        fprintf(fout, "# Tidx\tT_high\tT_low\trate_mean\trate_err_jk\n");
+        fprintf(fout, "# N=%d NT=%d nrep=%d nsamples=%d\n", N, NT, nrep, nsamples);
+
+        // Determine number of exchange pairs from reference
+        int nex = 0;
+        for (int s = 0; s < nsamples; s++) {
+            if ((int)all_ex[s].size() > nex)
+                nex = (int)all_ex[s].size();
+        }
+
+        for (int ei = 0; ei < nex; ei++) {
+            // Compute per-sample exchange rate
+            std::vector<double> sR(nsamples, 0.0);
+            double T_high = 0, T_low = 0;
+            int tidx = ei;
+            int n_valid = 0;
+
+            for (int s = 0; s < nsamples; s++) {
+                if (ei >= (int)all_ex[s].size()) continue;
+                auto& ex = all_ex[s][ei];
+                T_high = ex.T_high;
+                T_low = ex.T_low;
+                tidx = ex.tidx;
+                sR[s] = (ex.total_prop > 0)
+                    ? (double)ex.total_acc / ex.total_prop : 0.0;
+                n_valid++;
+            }
+            if (n_valid == 0) continue;
+
+            double fR = 0;
+            for (int s = 0; s < nsamples; s++) fR += sR[s];
+            fR /= nsamples;
+
+            double jR = 0;
+            for (int j = 0; j < nsamples; j++) {
+                double lR = 0;
+                for (int s = 0; s < nsamples; s++) {
+                    if (s == j) continue;
+                    lR += sR[s];
+                }
+                lR /= (nsamples - 1);
+                jR += (lR - fR) * (lR - fR);
+            }
+            jR = sqrt((nsamples - 1.0) / nsamples * jR);
+
+            fprintf(fout, "%d\t%.8f\t%.8f\t%.6f\t%.6f\n",
+                    tidx, T_high, T_low, fR, jR);
+
+            printf("  Exchange T[%d]-T[%d] (%.4f-%.4f): rate=%.4f +/- %.4f\n",
+                   tidx, tidx + 1, T_high, T_low, fR, jR);
         }
         fclose(fout);
         printf("  Written %s\n", outfile);

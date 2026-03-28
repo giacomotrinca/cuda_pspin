@@ -7,6 +7,7 @@
 #include "config.h"
 #include "mc.h"
 #include "disorder.h"
+#include "box.h"
 
 #define CUDA_CHECK(call) \
     do { \
@@ -111,27 +112,33 @@ int main(int argc, char** argv) {
     }
 
     // Print header
-    printf("========================================\n");
-    printf("Simulated Annealing: p-Spin 2+4\n");
-    printf("========================================\n");
+    printf("\n");
+    box_top();
+    box_title("        p-Spin 2+4 :: Simulated Annealing         ");
+    box_bot();
     if (cfg.verbose >= 2) {
         cudaDeviceProp prop;
         CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-        printf("GPU: %s (compute %d.%d)\n", prop.name, prop.major, prop.minor);
+        printf("  %-22s %s (compute %d.%d)\n", "GPU", prop.name, prop.major, prop.minor);
     }
     if (cfg.verbose >= 1) {
-        printf("N = %d, nrep = %d\n", cfg.N, cfg.nrep);
-        printf("Tmax = %.6f, Tmin = %.6f, ntemp = %d\n", Tmax, Tmin, ntemp);
-        printf("Sweeps per T = 2^%d = %d, save_freq = %d\n", cfg.mc_iterations, sweeps_per_temp, cfg.save_freq);
-        printf("Seed = %llu\n", (unsigned long long)cfg.seed);
+        printf("  %-22s %d\n", "N", cfg.N);
+        printf("  %-22s %d\n", "nrep", cfg.nrep);
+        printf("  %-22s %.6f\n", "Tmax", Tmax);
+        printf("  %-22s %.6f\n", "Tmin", Tmin);
+        printf("  %-22s %d\n", "ntemp", ntemp);
+        printf("  %-22s 2^%d = %d\n", "sweeps/T", cfg.mc_iterations, sweeps_per_temp);
+        printf("  %-22s %d\n", "save_freq", cfg.save_freq);
+        printf("  %-22s %llu\n", "seed", (unsigned long long)cfg.seed);
         if (cfg.fmc_mode > 0) {
             const char* fmc_names[] = {"FC", "comb", "uniform"};
-            printf("FMC: mode=%s, gamma=%.6f\n", fmc_names[cfg.fmc_mode], cfg.gamma);
+            printf("  %-22s %s (gamma=%.6f)\n", "FMC", fmc_names[cfg.fmc_mode], cfg.gamma);
         }
-        printf("Pairs: %lld, Quartets: %lld\n", n_pairs(cfg.N), n_quartets(cfg.N));
-        printf("Memory: %.1fMB (GPU: %.0fMB free / %.0fMB total)\n",
+        printf("  %-22s %lld\n", "pairs", n_pairs(cfg.N));
+        printf("  %-22s %lld\n", "quartets", n_quartets(cfg.N));
+        printf("  %-22s %.1f MB (%.0f MB free / %.0f MB)\n", "memory",
                mem_total/1e6, free_mem/1e6, total_mem/1e6);
-        printf("========================================\n");
+        printf("\n");
     }
 
     // Initialize MC state at Tmax
@@ -141,8 +148,8 @@ int main(int argc, char** argv) {
     // FMC stats
     if (cfg.fmc_mode > 0) {
         const char* fmc_names[] = {"FC", "comb", "uniform"};
-        printf("FMC: mode=%s gamma=%.6f  pairs=%lld/%lld  quartets=%lld/%lld\n",
-               fmc_names[cfg.fmc_mode], cfg.gamma,
+        printf("  %-22s %s (gamma=%.6f)  pairs=%lld/%lld  quartets=%lld/%lld\n",
+               "FMC active", fmc_names[cfg.fmc_mode], cfg.gamma,
                state.n_pairs_active, n_pairs(cfg.N),
                state.n_quart_active, n_quartets(cfg.N));
 
@@ -170,9 +177,10 @@ int main(int argc, char** argv) {
 
     // Geometric cooling ratio: T_k = Tmax * A^k, A = (Tmin/Tmax)^(1/(ntemp-1))
     double A = (ntemp > 1) ? pow(Tmin / Tmax, 1.0 / (ntemp - 1)) : 1.0;
-    printf("Geometric schedule: A = %.8f\n", A);
+    printf("  %-22s %.8f\n", "schedule (A)", A);
 
-    // ======== Annealing loop ========
+    // Annealing loop
+    box_sec("Running");
     for (int step = 0; step < ntemp; step++) {
         // Geometric schedule
         double T = Tmax * pow(A, step);
@@ -184,7 +192,7 @@ int main(int argc, char** argv) {
 
         // Run sweeps, saving every save_freq
         if (cfg.verbose >= 2) {
-            printf("  ── T = %.6f  [step %d/%d] ──\n", T, step + 1, ntemp);
+            printf("  -- T = %.6f  [step %d/%d] --\n", T, step + 1, ntemp);
             printf("  %6s", "sweep");
             for (int r = 0; r < cfg.nrep; r++)
                 printf("    E%d/N       acc%d  ", r, r);
@@ -224,21 +232,23 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Save final spin configuration at this temperature
-        mc_get_spins(state, h_spins);
-        for (int r = 0; r < cfg.nrep; r++) {
-            char conffile[512];
-            snprintf(conffile, sizeof(conffile),
-                     "%s/conf_r%d_T%.6f.bin", confdir, r, T);
-            FILE* fc = fopen(conffile, "wb");
-            if (fc) {
-                cuDoubleComplex* rep_spins = h_spins + (long long)r * cfg.N;
-                for (int i = 0; i < cfg.N; i++) {
-                    h_re_im[2*i]     = cuCreal(rep_spins[i]);
-                    h_re_im[2*i + 1] = cuCimag(rep_spins[i]);
+        // Save spin configuration at this temperature only from second half
+        if (step >= ntemp / 2) {
+            mc_get_spins(state, h_spins);
+            for (int r = 0; r < cfg.nrep; r++) {
+                char conffile[512];
+                snprintf(conffile, sizeof(conffile),
+                         "%s/conf_r%d_T%.6f.bin", confdir, r, T);
+                FILE* fc = fopen(conffile, "wb");
+                if (fc) {
+                    cuDoubleComplex* rep_spins = h_spins + (long long)r * cfg.N;
+                    for (int i = 0; i < cfg.N; i++) {
+                        h_re_im[2*i]     = cuCreal(rep_spins[i]);
+                        h_re_im[2*i + 1] = cuCimag(rep_spins[i]);
+                    }
+                    fwrite(h_re_im, sizeof(double), 2 * cfg.N, fc);
+                    fclose(fc);
                 }
-                fwrite(h_re_im, sizeof(double), 2 * cfg.N, fc);
-                fclose(fc);
             }
         }
 
@@ -254,10 +264,11 @@ int main(int argc, char** argv) {
     clock_gettime(CLOCK_MONOTONIC, &t_end);
     double elapsed = (t_end.tv_sec - t_start.tv_sec)
                    + (t_end.tv_nsec - t_start.tv_nsec) * 1e-9;
-    printf("========================================\n");
-    printf("Total time: %.3f s  (%d temps x %d sweeps = %lld total sweeps)\n",
-           elapsed, ntemp, sweeps_per_temp, (long long)ntemp * sweeps_per_temp);
-    printf("========================================\n");
+    printf("\n"); box_sec("Summary");
+    printf("  %-22s %.3f s\n", "total time", elapsed);
+    printf("  %-22s %d x %d = %lld\n", "total sweeps",
+           ntemp, sweeps_per_temp, (long long)ntemp * sweeps_per_temp);
+    printf("\n");
 
     // Save timing
     char timefile[256];

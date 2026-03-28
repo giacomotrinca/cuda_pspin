@@ -1,94 +1,50 @@
-# Makefile for p-Spin 2+4 Complex Spherical MC (CUDA) + Analysis (C++)
-# Target: Tesla V100S (sm_70), CUDA 9.1, gcc 7.5
+# p-Spin 2+4 -- CUDA 9.1 / gcc 7.5 / V100S (sm_70)
 
-# Compilers
-NVCC       := nvcc
-CXX        := g++
+NVCC    = nvcc
+CXX     = g++
 
-# Directories
-SRCDIR     := src
-INCDIR     := include
-LIBDIR     := lib
-BINDIR     := bin
-OBJDIR     := obj
+# shared library objects (everything except the three main programs)
+LIB_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
 
-# Targets
-MC_TARGET  := $(BINDIR)/pspin24
-SA_TARGET  := $(BINDIR)/simulated_annealing
-ANA_TARGET := $(BINDIR)/analysis
-ANA_SA_TARGET := $(BINDIR)/analysis_sa
+NVFLAGS = -std=c++11 -arch=sm_70 -O3 -Iinclude -DNDEBUG
+CXFLAGS = -std=c++11 -O3 -Wall -DNDEBUG
+LIBS    = -lcurand -lm
 
-# CUDA architecture: V100S = sm_70
-# sm_70 = native SASS, compute_70 = embedded PTX for forward compat
-CUDA_ARCH  := -gencode arch=compute_70,code=sm_70 \
-               -gencode arch=compute_70,code=compute_70
+.PHONY: all clean
 
-# Host compiler optimisation (passed to gcc via -Xcompiler)
-HOST_OPT   := -O3 -march=native -funroll-loops -ffast-math
+all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
+     bin/analysis bin/analysis_sa bin/analysis_pt
+	@echo "Done."
 
-# Flags
-NVCCFLAGS  := -std=c++14 $(CUDA_ARCH) -O3 --use_fast_math \
-               -I$(INCDIR) --expt-relaxed-constexpr \
-               -Xcompiler "$(HOST_OPT)" \
-               --ptxas-options=-O3
-CXXFLAGS   := -std=c++14 $(HOST_OPT) -Wall -flto
-LDFLAGS    := -lcurand -lm
-LDFLAGS_CXX := -lm -flto
+dirs:
+	@mkdir -p bin obj
 
-# Debug build
-ifdef DEBUG
-NVCCFLAGS  = -std=c++14 $(CUDA_ARCH) -O0 -g -G -DDEBUG -lineinfo \
-              -I$(INCDIR) --expt-relaxed-constexpr -Xcompiler "-O0 -g"
-CXXFLAGS   = -std=c++14 -O0 -g -DDEBUG -Wall
-LDFLAGS_CXX = -lm
-else
-NVCCFLAGS  += -DNDEBUG
-CXXFLAGS   += -DNDEBUG
-endif
+# --- CUDA executables ---
 
-# Library sources (shared between mc and sa)
-LIB_SOURCES := $(filter-out $(SRCDIR)/montecarlo.cu $(SRCDIR)/simulated_annealing.cu $(SRCDIR)/analysis.cpp, $(wildcard $(SRCDIR)/*.cu))
-LIB_OBJECTS := $(patsubst $(SRCDIR)/%.cu,$(OBJDIR)/%.o,$(LIB_SOURCES))
+bin/pspin24: obj/montecarlo.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
-# Rules
-.PHONY: all mc sa analysis analysis_sa clean directories
+bin/simulated_annealing: obj/simulated_annealing.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
-all: mc sa analysis analysis_sa
+bin/parallel_tempering: obj/parallel_tempering.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
-mc: directories $(MC_TARGET)
+# --- C++ analysis ---
 
-sa: directories $(SA_TARGET)
+bin/analysis: src/analysis.cpp | dirs
+	$(CXX) $(CXFLAGS) -o $@ $< -lm
 
-analysis: directories $(ANA_TARGET)
+bin/analysis_sa: src/analysis_sa.cpp | dirs
+	$(CXX) $(CXFLAGS) -o $@ $< -lm
 
-analysis_sa: directories $(ANA_SA_TARGET)
+bin/analysis_pt: src/analysis_pt.cpp | dirs
+	$(CXX) $(CXFLAGS) -o $@ $< -lm
 
-directories:
-	@mkdir -p $(BINDIR) $(OBJDIR)
+# --- pattern rule for .cu -> .o ---
 
-$(MC_TARGET): $(OBJDIR)/montecarlo.o $(LIB_OBJECTS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(SA_TARGET): $(OBJDIR)/simulated_annealing.o $(LIB_OBJECTS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(ANA_TARGET): $(SRCDIR)/analysis.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS_CXX)
-
-$(ANA_SA_TARGET): $(SRCDIR)/analysis_sa.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS_CXX)
-
-$(OBJDIR)/%.o: $(SRCDIR)/%.cu
-	$(NVCC) $(NVCCFLAGS) -c -o $@ $<
+obj/%.o: src/%.cu | dirs
+	$(NVCC) $(NVFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(OBJDIR) $(BINDIR)
-
-# Dependencies (manual for now)
-$(OBJDIR)/montecarlo.o:           $(SRCDIR)/montecarlo.cu $(INCDIR)/config.h $(INCDIR)/mc.h $(INCDIR)/hamiltonian.h $(INCDIR)/disorder.h
-$(OBJDIR)/simulated_annealing.o:  $(SRCDIR)/simulated_annealing.cu $(INCDIR)/config.h $(INCDIR)/mc.h $(INCDIR)/disorder.h
-$(OBJDIR)/config.o:      $(SRCDIR)/config.cu $(INCDIR)/config.h
-$(OBJDIR)/spins.o:       $(SRCDIR)/spins.cu $(INCDIR)/spins.h
-$(OBJDIR)/disorder.o:    $(SRCDIR)/disorder.cu $(INCDIR)/disorder.h
-$(OBJDIR)/hamiltonian.o: $(SRCDIR)/hamiltonian.cu $(INCDIR)/hamiltonian.h $(INCDIR)/disorder.h
-$(OBJDIR)/mc.o:          $(SRCDIR)/mc.cu $(INCDIR)/mc.h $(INCDIR)/spins.h $(INCDIR)/disorder.h $(INCDIR)/hamiltonian.h $(INCDIR)/config.h
+	rm -rf obj bin

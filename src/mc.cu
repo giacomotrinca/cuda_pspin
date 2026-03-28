@@ -49,7 +49,7 @@ __global__ void mc_sweep_kernel(
     const cuDoubleComplex* g2,    // [N * N] shared
     const cuDoubleComplex* g4,    // [C(N,4)] shared
     int N, int nrep,
-    double beta,
+    const double* betas,
     curandStatePhilox4_32_10_t* rng_states,  // [nrep]
     double* energies,             // [nrep]
     long long* accepted,          // [nrep]
@@ -57,6 +57,8 @@ __global__ void mc_sweep_kernel(
 ) {
     int rep = blockIdx.x;
     if (rep >= nrep) return;
+
+    double beta = betas[rep];
 
     int tid = threadIdx.x;
     int bdim = blockDim.x;
@@ -112,7 +114,7 @@ __global__ void mc_sweep_kernel(
         double local_dE = 0.0;
 
         // --- H2: factored computation ---
-        // ΔE_H2 = -2 Re(δ_i · Σ_k g_{i0,k} conj(a_k)) + same for j0 + pair
+        // dE_H2 = -2 Re(delta_i * Sum_k g_{i0,k} conj(a_k)) + same for j0 + pair
         cuDoubleComplex sum_i = make_cuDoubleComplex(0.0, 0.0);
         cuDoubleComplex sum_j = make_cuDoubleComplex(0.0, 0.0);
         for (int k = tid; k < N; k += bdim) {
@@ -437,6 +439,7 @@ MCState mc_init(const SimConfig& cfg) {
     CUDA_CHECK(cudaMemset(state.d_accepted, 0, nrep * sizeof(long long)));
     CUDA_CHECK(cudaMalloc(&state.d_proposed, nrep * sizeof(long long)));
     CUDA_CHECK(cudaMemset(state.d_proposed, 0, nrep * sizeof(long long)));
+    CUDA_CHECK(cudaMalloc(&state.d_betas, nrep * sizeof(double)));
 
     // Compute initial energies on GPU
     long long max_terms = (nq > n_pairs(N)) ? nq : n_pairs(N);
@@ -470,12 +473,21 @@ void mc_free(MCState& state) {
     if (state.d_energies) CUDA_CHECK(cudaFree(state.d_energies));
     if (state.d_accepted) CUDA_CHECK(cudaFree(state.d_accepted));
     if (state.d_proposed) CUDA_CHECK(cudaFree(state.d_proposed));
+    if (state.d_betas)    CUDA_CHECK(cudaFree(state.d_betas));
+}
+
+static __global__ void fill_double_kernel(double* arr, double val, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) arr[idx] = val;
 }
 
 void mc_sweep(MCState& state, const SimConfig& cfg) {
     int N = state.N;
     int nrep = state.nrep;
-    double beta = 1.0 / cfg.T;  // T=0 -> inf (greedy), T=inf -> 0 (all accept)
+    double beta = 1.0 / cfg.T;
+
+    // Fill per-replica betas with uniform value
+    fill_double_kernel<<<(nrep + 255) / 256, 256>>>(state.d_betas, beta, nrep);
 
     int block_size = 256;
     int nwarps = block_size >> 5;
@@ -483,7 +495,7 @@ void mc_sweep(MCState& state, const SimConfig& cfg) {
 
     mc_sweep_kernel<<<nrep, block_size, shared_bytes>>>(
         state.d_spins, state.d_g2, state.d_g4,
-        N, nrep, beta,
+        N, nrep, state.d_betas,
         state.d_rng, state.d_energies,
         state.d_accepted, state.d_proposed);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -503,4 +515,25 @@ void mc_get_spins(const MCState& state, cuDoubleComplex* h_spins) {
     CUDA_CHECK(cudaMemcpy(h_spins, state.d_spins,
                           (long long)state.nrep * state.N * sizeof(cuDoubleComplex),
                           cudaMemcpyDeviceToHost));
+}
+
+void mc_sweep_pt(MCState& state) {
+    int N = state.N;
+    int nrep = state.nrep;
+
+    int block_size = 256;
+    int nwarps = block_size >> 5;
+    size_t shared_bytes = (N + 2) * sizeof(cuDoubleComplex) + nwarps * sizeof(double);
+
+    mc_sweep_kernel<<<nrep, block_size, shared_bytes>>>(
+        state.d_spins, state.d_g2, state.d_g4,
+        N, nrep, state.d_betas,
+        state.d_rng, state.d_energies,
+        state.d_accepted, state.d_proposed);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void mc_set_betas(MCState& state, const double* h_betas) {
+    CUDA_CHECK(cudaMemcpy(state.d_betas, h_betas,
+                          state.nrep * sizeof(double), cudaMemcpyHostToDevice));
 }

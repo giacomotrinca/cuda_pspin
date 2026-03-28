@@ -52,8 +52,19 @@ done
 # Compute 2^ITER
 MC_ITER=$((1 << ITER))
 
-echo "=== montecarlo launcher ==="
-echo "N=$SIZE  T=$TEMP  J=$J  iter=2^${ITER}=${MC_ITER}  seed=$SEED  nrep=$NREP  save_freq=$SAVE_FREQ"
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║            p-Spin 2+4 :: Monte Carlo             ║"
+echo "╚══════════════════════════════════════════════════╝"
+printf "  %-22s %s\n" "N" "$SIZE"
+printf "  %-22s %s\n" "nrep" "$NREP"
+printf "  %-22s %s\n" "T" "$TEMP"
+printf "  %-22s %s\n" "J" "$J"
+printf "  %-22s %s  (2^%s)\n" "sweeps" "$MC_ITER" "$ITER"
+printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
+printf "  %-22s %s\n" "seed" "$SEED"
+if [ -n "$DEV" ]; then printf "  %-22s %s\n" "GPU device" "$DEV"; fi
+if [ -n "$FMC" ]; then printf "  %-22s %s\n" "FMC mode" "$FMC"; fi
 echo ""
 
 VERBOSE_FLAG=""
@@ -66,9 +77,9 @@ if [ -n "$LABEL" ]; then
     LABEL_FLAG="-label $LABEL"
 fi
 
+DEV_FLAG=""
 if [ -n "$DEV" ]; then
     DEV_FLAG="-dev $DEV"
-    echo "Using GPU device: $DEV"
 fi
 
 FMC_FLAG=""

@@ -219,7 +219,14 @@ int main(int argc, char** argv) {
             fprintf(stderr, "No data found in %s\n", datadir);
             return 1;
         }
-        printf("=== Single sample analysis: %s (%d points, %d replicas) ===\n\n", datadir, (int)data.size(), nrep);
+        printf("\n");
+        printf("╔══════════════════════════════════════════════════╗\n");
+        printf("║           p-Spin 2+4 :: Analysis (MC)            ║\n");
+        printf("╚══════════════════════════════════════════════════╝\n");
+        printf("  %-22s single\n", "mode");
+        printf("  %-22s %s\n", "directory", datadir);
+        printf("  %-22s %d\n", "data points", (int)data.size());
+        printf("  %-22s %d\n\n", "replicas", nrep);
         single_sample_analysis(datadir, data, nrep);
         return 0;
     }
@@ -234,12 +241,13 @@ int main(int argc, char** argv) {
     }
 
     int nsamples = (int)labels.size();
-    printf("========================================\n");
-    printf("Multi-sample analysis: N=%d  nrep=%d\n", N, nrep);
-    printf("Found %d samples: S%d", nsamples, labels[0]);
-    for (int i = 1; i < nsamples; i++) printf(", S%d", labels[i]);
     printf("\n");
-    printf("========================================\n\n");
+    printf("╔══════════════════════════════════════════════════╗\n");
+    printf("║           p-Spin 2+4 :: Analysis (MC)            ║\n");
+    printf("╚══════════════════════════════════════════════════╝\n");
+    printf("  %-22s %d\n", "N", N);
+    printf("  %-22s %d\n", "nrep", nrep);
+    printf("  %-22s %d\n\n", "samples", nsamples);
 
     // Per-sample: compute last-half mean E/N for each replica
     // E_sr[s][r] = mean energy of sample s, replica r (last half of time series)
@@ -255,7 +263,7 @@ int main(int argc, char** argv) {
         }
         E_sr[s] = last_half_mean(data, nrep);
 
-        printf("--- Sample S%d (%s, %d points) ---\n", labels[s], sdir, (int)data.size());
+        printf("\n── Sample S%d ──────────────────────────────────────\n", labels[s]);
         single_sample_analysis(sdir, data, nrep);
         printf("\n");
     }
@@ -288,9 +296,8 @@ int main(int argc, char** argv) {
     //   then jackknife over samples
     // ================================================================
 
-    printf("========================================\n");
-    printf("SAMPLE AVERAGES (jackknife, %d samples)\n", S);
-    printf("========================================\n\n");
+    printf("\n── Sample Averages ────────────────────────────────\n");
+    printf("  %-22s %d\n\n", "jackknife samples", S);
 
     // Per-replica sample averages
     printf("Per-replica averages:\n");
@@ -352,8 +359,8 @@ int main(int argc, char** argv) {
     }
     double jk_err_all = (S > 1) ? sqrt((double)(S - 1) / S * jk_sum2) : 0.0;
 
-    printf("\nReplica + sample averaged:\n");
-    printf("  [E/N] = %.8f +/- %.8f\n", mean_all, jk_err_all);
+    printf("\n── Result ──────────────────────────────────────────\n");
+    printf("  %-22s %.8f +/- %.8f\n", "[E/N]", mean_all, jk_err_all);
 
     if (fsum) {
         fprintf(fsum, "# Replica + sample averaged:\n");

@@ -16,6 +16,7 @@ struct MCState {
     double* d_energies;          // device: energies [nrep]
     long long* d_accepted;       // device: accepted moves [nrep]
     long long* d_proposed;       // device: proposed moves [nrep]
+    double* d_betas;             // device: per-replica inverse temperatures [nrep]
 
     double* h_omega;             // host: frequencies [N] (NULL if FC)
     long long n_pairs_active;    // active pairs after FMC
@@ -40,5 +41,11 @@ void mc_get_results(const MCState& state, double* h_energies,
 
 // Copy all replica spins to host (caller allocates nrep*N cuDoubleComplex)
 void mc_get_spins(const MCState& state, cuDoubleComplex* h_spins);
+
+// Sweep using pre-set per-replica betas (call mc_set_betas first)
+void mc_sweep_pt(MCState& state);
+
+// Upload per-replica betas from host array to device
+void mc_set_betas(MCState& state, const double* h_betas);
 
 #endif

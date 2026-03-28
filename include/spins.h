@@ -28,10 +28,10 @@ inline __device__ void propose_pair_rotation(
     double ai_re = cuCreal(a_i), ai_im = cuCimag(a_i);
     double aj_re = cuCreal(a_j), aj_im = cuCimag(a_j);
 
-    // e^{iφ} a_j
+    // e^{i*phi} a_j
     double ep_aj_re = cp * aj_re - sp * aj_im;
     double ep_aj_im = sp * aj_re + cp * aj_im;
-    // e^{-iφ} a_i
+    // e^{-i*phi} a_i
     double em_ai_re =  cp * ai_re + sp * ai_im;
     double em_ai_im = -sp * ai_re + cp * ai_im;
 

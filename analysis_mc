@@ -28,9 +28,6 @@ for arg in "$@"; do
     esac
 done
 
-echo "=== analysis launcher ==="
-echo "N=$SIZE  nrep=$NREP"
-
 EXTRA=""
 if [ -n "$DATADIR" ]; then
     EXTRA="-datadir $DATADIR"
@@ -39,10 +36,6 @@ fi
 LABEL_FLAG=""
 if [ -n "$LABEL" ]; then
     LABEL_FLAG="-label $LABEL"
-    echo "Mode: single sample S$LABEL"
-else
-    echo "Mode: averaging over all samples"
 fi
-echo ""
 
 exec ./bin/analysis -N "$SIZE" -nrep "$NREP" $LABEL_FLAG $EXTRA

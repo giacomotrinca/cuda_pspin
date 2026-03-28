@@ -1,23 +1,24 @@
 #!/bin/bash
 
-# Launch multiple independent samples of simulated annealing
+# Launch multiple independent samples of parallel tempering
 # Each sample uses a different seed (= different disorder realisation)
 
 # Default parameters
 SIZE=18
-TMAX=2.0
+TMAX=1.0
 TMIN=0.001
-NTEMP=20
+NT=20
 J=1.0
-ITER=13
+ITER=20
 SEED=$RANDOM
-NREP=4
-SAVE_FREQ=64
+NREP=2
+PT_FREQ=64
+SAVE_FREQ=256
 NSAMPLES=3
 DEV=0
 FMC=1
 GAMMA=""
-SHOW_OUTPUT=1
+SHOW_OUTPUT=2
 
 # Parse arguments
 for arg in "$@"; do
@@ -25,11 +26,12 @@ for arg in "$@"; do
         --size=*)      SIZE="${arg#*=}" ;;
         --tmax=*)      TMAX="${arg#*=}" ;;
         --tmin=*)      TMIN="${arg#*=}" ;;
-        --ntemp=*)     NTEMP="${arg#*=}" ;;
+        --nt=*)        NT="${arg#*=}" ;;
         --J=*)         J="${arg#*=}" ;;
         --iter=*)      ITER="${arg#*=}" ;;
         --seed=*)      SEED="${arg#*=}" ;;
         --nrep=*)      NREP="${arg#*=}" ;;
+        --pt_freq=*)   PT_FREQ="${arg#*=}" ;;
         --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
         --nsamples=*)  NSAMPLES="${arg#*=}" ;;
         --dev=*)       DEV="${arg#*=}" ;;
@@ -38,20 +40,21 @@ for arg in "$@"; do
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
-            echo "  --size=N       Number of spins (default: $SIZE)"
-            echo "  --tmax=T       Max temperature (default: $TMAX)"
-            echo "  --tmin=T       Min temperature (default: $TMIN)"
-            echo "  --ntemp=N      Number of temperature steps (default: $NTEMP)"
-            echo "  --J=J          Coupling scale (default: $J)"
-            echo "  --iter=K       Sweeps per temp = 2^K (default: $ITER)"
-            echo "  --seed=S       Initial RNG seed (default: random)"
-            echo "  --nrep=R       Number of replicas (default: $NREP)"
-            echo "  --save_freq=K  Save every K iterations (default: $SAVE_FREQ)"
-            echo "  --nsamples=S   Number of disorder samples (default: $NSAMPLES)"
-            echo "  --dev=D        GPU device index (default: $DEV)"
-            echo "  --fmc=M        FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
-            echo "  --gamma=G      FMC gamma (default: auto)"
-            echo "  --show-output=L Print progress: 0=silent 1=temp 2=sweeps (default: $SHOW_OUTPUT)"
+            echo "  --size=N        Number of spins (default: $SIZE)"
+            echo "  --tmax=T        Max temperature (default: $TMAX)"
+            echo "  --tmin=T        Min temperature (default: $TMIN)"
+            echo "  --nt=N          Number of temperatures (default: $NT)"
+            echo "  --J=J           Coupling scale (default: $J)"
+            echo "  --iter=K        MC sweeps = 2^K (default: $ITER)"
+            echo "  --seed=S        Initial RNG seed (default: random)"
+            echo "  --nrep=R        Independent copies per temperature (default: $NREP)"
+            echo "  --pt_freq=P     Propose exchanges every P sweeps (default: $PT_FREQ)"
+            echo "  --save_freq=K   Save every K sweeps (default: $SAVE_FREQ)"
+            echo "  --nsamples=S    Number of disorder samples (default: $NSAMPLES)"
+            echo "  --dev=D         GPU device index (default: $DEV)"
+            echo "  --fmc=M         FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
+            echo "  --gamma=G       FMC gamma (default: auto)"
+            echo "  --show-output=L Verbosity: 0=silent 1=compact 2=detailed (default: $SHOW_OUTPUT)"
             exit 0
             ;;
         *)
@@ -62,18 +65,21 @@ for arg in "$@"; do
 done
 
 SWEEPS=$((1 << ITER))
+TOTAL_REPLICAS=$((NT * NREP))
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
-echo "║         p-Spin 2+4 :: Scan Samples (SA)          ║"
+echo "║         p-Spin 2+4 :: Scan Samples (PT)          ║"
 echo "╚══════════════════════════════════════════════════╝"
 printf "  %-22s %s\n" "N" "$SIZE"
-printf "  %-22s %s\n" "nrep" "$NREP"
+printf "  %-22s %s\n" "NT" "$NT"
+printf "  %-22s %s\n" "nrep/T" "$NREP"
+printf "  %-22s %s\n" "total replicas" "$TOTAL_REPLICAS"
 printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
-printf "  %-22s %s\n" "ntemp" "$NTEMP"
 printf "  %-22s %s\n" "J" "$J"
-printf "  %-22s %s  (2^%s)\n" "sweeps/temp" "$SWEEPS" "$ITER"
+printf "  %-22s %s  (2^%s)\n" "sweeps" "$SWEEPS" "$ITER"
+printf "  %-22s %s\n" "pt_freq" "$PT_FREQ"
 printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
 printf "  %-22s %s\n" "samples" "$NSAMPLES"
 printf "  %-22s %s\n" "seed (initial)" "$SEED"
@@ -85,7 +91,7 @@ for S in $(seq 0 $((NSAMPLES - 1))); do
     printf "── Sample %d/%d (seed=%s) " "$S" "$((NSAMPLES - 1))" "$SEED"
     printf '─%.0s' $(seq 1 28)
     printf "\n"
-    ./simulated_annealing --size=$SIZE --tmax=$TMAX --tmin=$TMIN --ntemp=$NTEMP --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT
+    ./parallel_tempering --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT
     echo ""
     SEED=$((SEED + 1))
 done

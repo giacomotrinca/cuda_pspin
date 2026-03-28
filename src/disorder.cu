@@ -118,7 +118,7 @@ __global__ void fmc_filter_g4_kernel(cuDoubleComplex* g4, const double* omega,
     rem -= (long long)jj * (jj - 1) / 2;
     int ii = (int)rem;
     // FMC: for sorted ii<jj<kk<ll, condition on frequencies
-    // |omega_jj - omega_ii + omega_kk - omega_ll| > gamma → zero out
+    // |omega_jj - omega_ii + omega_kk - omega_ll| > gamma => zero out
     // equivalently |(omega_jj + omega_kk) - (omega_ii + omega_ll)| > gamma
     double dw = fabs(omega[jj] - omega[ii] + omega[kk] - omega[ll]);
     if (dw > gamma) {

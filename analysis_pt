@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Launcher for PT analysis binary (bin/analysis_pt)
+
+SIZE=18
+NT=20
+NREP=2
+
+for arg in "$@"; do
+    case "$arg" in
+        --size=*)   SIZE="${arg#*=}" ;;
+        --nt=*)     NT="${arg#*=}" ;;
+        --nrep=*)   NREP="${arg#*=}" ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "  --size=N    Number of spins (default: $SIZE)"
+            echo "  --nt=NT     Number of temperatures (default: $NT)"
+            echo "  --nrep=R    Number of replicas per temperature (default: $NREP)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+./bin/analysis_pt -N "$SIZE" -NT "$NT" -nrep "$NREP"

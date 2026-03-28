@@ -7,6 +7,7 @@
 #include "config.h"
 #include "mc.h"
 #include "disorder.h"
+#include "box.h"
 
 #define CUDA_CHECK(call) \
     do { \
@@ -68,23 +69,27 @@ int main(int argc, char** argv) {
     if (cfg.verbose) {
         cudaDeviceProp prop;
         CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-        printf("========================================\n");
-        printf("p-Spin 2+4 Complex Spherical MC\n");
-        printf("========================================\n");
-        printf("GPU: %s (compute %d.%d)\n", prop.name, prop.major, prop.minor);
-        printf("N = %d, nrep = %d\n", cfg.N, cfg.nrep);
-        printf("T = %.4f, J = %.4f\n", cfg.T, cfg.J);
-        printf("MC iterations = %d, save_freq = %d\n", cfg.mc_iterations, cfg.save_freq);
-        printf("Seed = %llu\n", (unsigned long long)cfg.seed);
+        printf("\n");
+        box_top();
+        box_title("            p-Spin 2+4 :: Monte Carlo             ");
+        box_bot();
+        printf("  %-22s %s (compute %d.%d)\n", "GPU", prop.name, prop.major, prop.minor);
+        printf("  %-22s %d\n", "N", cfg.N);
+        printf("  %-22s %d\n", "nrep", cfg.nrep);
+        printf("  %-22s %.6f\n", "T", cfg.T);
+        printf("  %-22s %.4f\n", "J", cfg.J);
+        printf("  %-22s %d\n", "MC sweeps", cfg.mc_iterations);
+        printf("  %-22s %d\n", "save_freq", cfg.save_freq);
+        printf("  %-22s %llu\n", "seed", (unsigned long long)cfg.seed);
         if (cfg.fmc_mode > 0) {
             const char* fmc_names[] = {"FC", "comb", "uniform"};
-            printf("FMC: mode=%s, gamma=%.4f\n", fmc_names[cfg.fmc_mode], cfg.gamma);
+            printf("  %-22s %s (gamma=%.4f)\n", "FMC", fmc_names[cfg.fmc_mode], cfg.gamma);
         }
-        printf("Pairs: %lld, Quartets: %lld\n", n_pairs(cfg.N), n_quartets(cfg.N));
-        printf("Memory: g2=%.1fMB g4=%.1fMB spins=%.1fMB rng+aux=%.1fMB total=%.1fMB\n",
-               mem_g2/1e6, mem_g4/1e6, mem_spins/1e6, (mem_rng+mem_aux)/1e6, mem_total/1e6);
-        printf("GPU: %.0fMB free / %.0fMB total\n", free_mem/1e6, total_mem/1e6);
-        printf("========================================\n");
+        printf("  %-22s %lld\n", "pairs", n_pairs(cfg.N));
+        printf("  %-22s %lld\n", "quartets", n_quartets(cfg.N));
+        printf("  %-22s %.1f MB (%.0f MB free / %.0f MB)\n", "memory",
+               mem_total/1e6, free_mem/1e6, total_mem/1e6);
+        printf("\n");
     }
 
     // Initialize MC state (disorder + all replicas)
@@ -93,8 +98,8 @@ int main(int argc, char** argv) {
     // FMC stats and frequency file
     if (cfg.fmc_mode > 0) {
         const char* fmc_names[] = {"FC", "comb", "uniform"};
-        printf("FMC: mode=%s gamma=%.4f  pairs=%lld/%lld  quartets=%lld/%lld\n",
-               fmc_names[cfg.fmc_mode], cfg.gamma,
+        printf("  %-22s %s (gamma=%.4f)  pairs=%lld/%lld  quartets=%lld/%lld\n",
+               "FMC active", fmc_names[cfg.fmc_mode], cfg.gamma,
                state.n_pairs_active, n_pairs(cfg.N),
                state.n_quart_active, n_quartets(cfg.N));
         char freqfile[256];
@@ -117,7 +122,7 @@ int main(int argc, char** argv) {
     double* h_re_im = new double[2 * cfg.N]; // re/im interleaved for one replica
 
     // MC loop
-    if (cfg.verbose) printf("Running %d MC iterations...\n", cfg.mc_iterations);
+    if (cfg.verbose) box_sec("Running");
 
     struct timespec t_start, t_end;
     clock_gettime(CLOCK_MONOTONIC, &t_start);
@@ -136,21 +141,23 @@ int main(int argc, char** argv) {
             fprintf(fout, "\n");
             fflush(fout);
 
-            // Save spin configurations (binary: N doubles re, N doubles im per replica)
-            mc_get_spins(state, h_spins);
-            for (int r = 0; r < cfg.nrep; r++) {
-                char conffile[512];
-                snprintf(conffile, sizeof(conffile),
-                         "%s/conf_r%d_iter%d.bin", confdir, r, s + 1);
-                FILE* fc = fopen(conffile, "wb");
-                if (fc) {
-                    cuDoubleComplex* rep_spins = h_spins + (long long)r * cfg.N;
-                    for (int i = 0; i < cfg.N; i++) {
-                        h_re_im[2*i]     = cuCreal(rep_spins[i]);
-                        h_re_im[2*i + 1] = cuCimag(rep_spins[i]);
+            // Save spin configurations only in second half of simulation
+            if (s >= cfg.mc_iterations / 2) {
+                mc_get_spins(state, h_spins);
+                for (int r = 0; r < cfg.nrep; r++) {
+                    char conffile[512];
+                    snprintf(conffile, sizeof(conffile),
+                             "%s/conf_r%d_iter%d.bin", confdir, r, s + 1);
+                    FILE* fc = fopen(conffile, "wb");
+                    if (fc) {
+                        cuDoubleComplex* rep_spins = h_spins + (long long)r * cfg.N;
+                        for (int i = 0; i < cfg.N; i++) {
+                            h_re_im[2*i]     = cuCreal(rep_spins[i]);
+                            h_re_im[2*i + 1] = cuCimag(rep_spins[i]);
+                        }
+                        fwrite(h_re_im, sizeof(double), 2 * cfg.N, fc);
+                        fclose(fc);
                     }
-                    fwrite(h_re_im, sizeof(double), 2 * cfg.N, fc);
-                    fclose(fc);
                 }
             }
 
@@ -171,8 +178,13 @@ int main(int argc, char** argv) {
     double elapsed = (t_end.tv_sec - t_start.tv_sec)
                    + (t_end.tv_nsec - t_start.tv_nsec) * 1e-9;
     double t_per_iter = elapsed / cfg.mc_iterations;
-    printf("Time: %.3f s total, %.4f ms/iter (N=%d, nrep=%d)\n",
-           elapsed, t_per_iter * 1e3, cfg.N, cfg.nrep);
+
+    printf("\n"); box_sec("Summary");
+    printf("  %-22s %.3f s\n", "total time", elapsed);
+    printf("  %-22s %.4f ms\n", "time/sweep", t_per_iter * 1e3);
+    printf("  %-22s %d\n", "N", cfg.N);
+    printf("  %-22s %d\n", "nrep", cfg.nrep);
+    printf("\n");
 
     // Save timing to file
     char timefile[256];
@@ -188,16 +200,14 @@ int main(int argc, char** argv) {
     // Final results
     if (cfg.verbose) {
         mc_get_results(state, h_energies, h_accepted, h_proposed);
-        printf("\n========================================\n");
-        printf("RESULTS\n");
-        printf("========================================\n");
+        box_sec("Results");
         for (int r = 0; r < cfg.nrep; r++) {
             double acc = (h_proposed[r] > 0)
                 ? (double)h_accepted[r] / h_proposed[r] : 0.0;
-            printf("Replica %d: E/N = %.6f, acc = %.4f\n",
+            printf("  Replica %-12d E/N = %.6f   acc = %.4f\n",
                    r, h_energies[r] / cfg.N, acc);
         }
-        printf("========================================\n");
+        printf("\n");
     }
 
     // Cleanup
