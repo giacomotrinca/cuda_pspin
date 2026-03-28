@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# Default parameters
+SIZE=18
+TMAX=2.0
+TMIN=0.01
+NTEMP=36
+J=1.0
+ITER=14
+SEED=$RANDOM
+NREP=2
+SAVE_FREQ=64
+SHOW_OUTPUT=0
+LABEL=""
+DEV=0
+FMC=1 # 0: no FMC, 1: comb-like, 2: uniform
+GAMMA=""
+
+# Parse arguments
+for arg in "$@"; do
+    case "$arg" in
+        --size=*)      SIZE="${arg#*=}" ;;
+        --tmax=*)      TMAX="${arg#*=}" ;;
+        --tmin=*)      TMIN="${arg#*=}" ;;
+        --ntemp=*)     NTEMP="${arg#*=}" ;;
+        --J=*)         J="${arg#*=}" ;;
+        --iter=*)      ITER="${arg#*=}" ;;
+        --seed=*)      SEED="${arg#*=}" ;;
+        --nrep=*)      NREP="${arg#*=}" ;;
+        --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
+        --label=*)     LABEL="${arg#*=}" ;;
+        --dev=*)       DEV="${arg#*=}" ;;
+        --fmc=*)       FMC="${arg#*=}" ;;
+        --gamma=*)     GAMMA="${arg#*=}" ;;
+        --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "  --size=N       Number of spins (default: $SIZE)"
+            echo "  --tmax=T       Max temperature (default: $TMAX)"
+            echo "  --tmin=T       Min temperature (default: $TMIN)"
+            echo "  --ntemp=N      Number of temperature steps (default: $NTEMP)"
+            echo "  --J=J          Coupling scale (default: $J)"
+            echo "  --iter=K       Sweeps per temp = 2^K (default: $ITER)"
+            echo "  --seed=S       RNG seed (default: random)"
+            echo "  --nrep=R       Number of replicas (default: $NREP)"
+            echo "  --save_freq=K  Save every K iterations (default: $SAVE_FREQ)"
+            echo "  --label=L      Sample label (default: none)"
+            echo "  --dev=D        GPU device index (default: all visible)"
+            echo "  --fmc=M        FMC mode: 0=FC, 1=comb, 2=uniform (default: 0)"
+            echo "  --gamma=G      FMC gamma (default: auto)"
+            echo "  --show-output=L Print progress: 0=silent 1=temp 2=sweeps (default: $SHOW_OUTPUT)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+# Compute 2^ITER
+SWEEPS=$((1 << ITER))
+
+echo "=== simulated annealing launcher ==="
+echo "N=$SIZE  Tmax=$TMAX  Tmin=$TMIN  ntemp=$NTEMP  J=$J"
+echo "sweeps/temp=2^${ITER}=${SWEEPS}  seed=$SEED  nrep=$NREP  save_freq=$SAVE_FREQ"
+echo ""
+
+VERBOSE_FLAG=""
+if [ "$SHOW_OUTPUT" -gt 0 ]; then
+    VERBOSE_FLAG="-verbose $SHOW_OUTPUT"
+fi
+
+LABEL_FLAG=""
+if [ -n "$LABEL" ]; then
+    LABEL_FLAG="-label $LABEL"
+fi
+
+DEV_FLAG=""
+if [ -n "$DEV" ]; then
+    DEV_FLAG="-dev $DEV"
+    echo "Using GPU device: $DEV"
+fi
+
+FMC_FLAG=""
+if [ -n "$FMC" ]; then
+    FMC_FLAG="-fmc $FMC"
+fi
+
+GAMMA_FLAG=""
+if [ -n "$GAMMA" ]; then
+    GAMMA_FLAG="-gamma $GAMMA"
+fi
+
+./bin/simulated_annealing -N "$SIZE" -Tmax "$TMAX" -Tmin "$TMIN" -ntemp "$NTEMP" -J "$J" -iter "$ITER" -seed "$SEED" -nrep "$NREP" -save_freq "$SAVE_FREQ" $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG $GAMMA_FLAG

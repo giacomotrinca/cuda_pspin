@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Launcher for SA analysis binary (bin/analysis_sa)
+
+SIZE=18
+NREP=4
+
+for arg in "$@"; do
+    case "$arg" in
+        --size=*)   SIZE="${arg#*=}" ;;
+        --nrep=*)   NREP="${arg#*=}" ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "  --size=N    Number of spins (default: $SIZE)"
+            echo "  --nrep=R    Number of replicas (default: $NREP)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+./bin/analysis_sa -N "$SIZE" -nrep "$NREP"

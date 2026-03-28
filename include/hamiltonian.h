@@ -5,7 +5,7 @@
 
 // Compute the full energy H = H2 + H4
 // H2 = -sum_{i<j} g2_ij a_i a*_j + c.c.
-// H4 = -sum_{i<j<k<l} g4_ijkl a_i a_j a*_k a*_l + c.c.
+// H4 = -sum_{i<j<k<l} g4_ijkl a_i a*_j a_k a*_l + c.c.
 double compute_energy(
     const cuDoubleComplex* d_spins,
     const cuDoubleComplex* d_g2,

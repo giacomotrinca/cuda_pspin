@@ -80,3 +80,64 @@ void generate_g4(cuDoubleComplex* d_g4, int N, double J, unsigned long long seed
     scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g4, nq, sigma);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
+
+// ============================================================================
+// FMC filter kernels
+// ============================================================================
+
+__global__ void fmc_filter_g2_kernel(cuDoubleComplex* g2, const double* omega,
+                                     int N, double gamma) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N * N) return;
+    int i = idx / N;
+    int j = idx % N;
+    if (i < j) {
+        double dw = fabs(omega[i] - omega[j]);
+        if (dw > gamma) {
+            g2[i * N + j] = make_cuDoubleComplex(0.0, 0.0);
+        }
+    }
+}
+
+__global__ void fmc_filter_g4_kernel(cuDoubleComplex* g4, const double* omega,
+                                     int N, double gamma, long long nq) {
+    long long q = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= nq) return;
+    // Decode combinatorial index to sorted (ii, jj, kk, ll) with ii < jj < kk < ll
+    int ll = 3;
+    while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q) ll++;
+    ll--;
+    long long rem = q - (long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24;
+    int kk = 2;
+    while ((long long)kk * (kk - 1) * (kk - 2) / 6 <= rem) kk++;
+    kk--;
+    rem -= (long long)kk * (kk - 1) * (kk - 2) / 6;
+    int jj = 1;
+    while ((long long)jj * (jj - 1) / 2 <= rem) jj++;
+    jj--;
+    rem -= (long long)jj * (jj - 1) / 2;
+    int ii = (int)rem;
+    // FMC: for sorted ii<jj<kk<ll, condition on frequencies
+    // |omega_jj - omega_ii + omega_kk - omega_ll| > gamma → zero out
+    // equivalently |(omega_jj + omega_kk) - (omega_ii + omega_ll)| > gamma
+    double dw = fabs(omega[jj] - omega[ii] + omega[kk] - omega[ll]);
+    if (dw > gamma) {
+        g4[q] = make_cuDoubleComplex(0.0, 0.0);
+    }
+}
+
+void apply_fmc_g2(cuDoubleComplex* d_g2, int N, const double* d_omega, double gamma) {
+    int total = N * N;
+    int block_size = 256;
+    int grid_size = (total + block_size - 1) / block_size;
+    fmc_filter_g2_kernel<<<grid_size, block_size>>>(d_g2, d_omega, N, gamma);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void apply_fmc_g4(cuDoubleComplex* d_g4, int N, const double* d_omega, double gamma) {
+    long long nq = n_quartets(N);
+    int block_size = 256;
+    long long grid_size = (nq + block_size - 1) / block_size;
+    fmc_filter_g4_kernel<<<(int)grid_size, block_size>>>(d_g4, d_omega, N, gamma, nq);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}

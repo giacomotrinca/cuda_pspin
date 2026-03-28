@@ -1,0 +1,175 @@
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{physics}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\newcommand{\de}{\mathrm{d}}
+
+\title{Probability Distribution of the FMC Frequency--Mismatch Variable \\[4pt]
+       \large $|\omega_j - \omega_i + \omega_k - \omega_l| \leq \gamma$}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{Setup}
+%======================================================================
+
+Let $\omega_1, \dots, \omega_N$ be i.i.d.\ random variables drawn from a
+probability distribution $f(\omega)$ with characteristic function
+$\phi(t) = \langle e^{it\omega}\rangle$.
+Define the frequency--mismatch variable
+\begin{equation}\label{eq:Delta}
+  \Delta \;=\; \omega_j - \omega_i + \omega_k - \omega_l ,
+  \qquad i<j<k<l .
+\end{equation}
+In the FMC (Frequency--Matching Condition) filter applied to the
+4--body couplings $g_{ijkl}^{(4)}$, one sets $g_{ijkl}^{(4)} = 0$
+whenever $|\Delta| > \gamma$.
+We want to compute (i) the pdf $p_\Delta(\delta)$ and (ii) the
+survival probability
+\begin{equation}\label{eq:Pgamma}
+  P(|\Delta|\leq\gamma)
+  = \int_{-\gamma}^{\gamma} p_\Delta(\delta)\,\de\delta .
+\end{equation}
+
+%======================================================================
+\section{General formula}
+%======================================================================
+
+Since $\Delta = (\omega_j + \omega_k) - (\omega_i + \omega_l)$, the
+characteristic function factorises as
+\begin{equation}
+  \phi_\Delta(t)
+  = \phi(t)\,\overline{\phi(t)}\,\phi(t)\,\overline{\phi(t)}
+  = |\phi(t)|^4 ,
+\end{equation}
+and the pdf is obtained by inverse Fourier transform:
+\begin{equation}
+  p_\Delta(\delta)
+  = \frac{1}{2\pi}\int_{-\infty}^{\infty}
+      |\phi(t)|^4\, e^{-it\delta}\,\de t .
+\end{equation}
+The distribution is always real, symmetric ($p_\Delta(-\delta) = p_\Delta(\delta)$),
+and peaked at $\delta=0$.
+
+%======================================================================
+\section{Uniform frequencies: $\omega_i \sim U[0,a]$}
+%======================================================================
+
+\subsection{Derivation}
+
+Set $u_i = \omega_i / a \sim U[0,1]$ and $x = \delta/a$.
+Each pairwise sum $S = u_\alpha + u_\beta$ has the triangular
+(B--spline of order~2) pdf on $[0,2]$:
+\[
+  p_S(s) = \begin{cases} s & 0\le s\le 1,\\ 2-s & 1\le s\le 2.\end{cases}
+\]
+The difference $x = S_1 - S_2$ has pdf equal to the auto--correlation
+of the triangle, which is the cubic B--spline (order~4) on $[-2,2]$:
+
+\begin{equation}\label{eq:uniform-pdf}
+  \boxed{
+  p_{\Delta/a}(x) = \begin{cases}
+    \dfrac{2}{3} - x^2 + \dfrac{|x|^3}{2}
+      & |x| \leq 1 , \\[8pt]
+    \dfrac{(2-|x|)^3}{6}
+      & 1 \leq |x| \leq 2 , \\[8pt]
+    0 & |x| > 2 .
+  \end{cases}}
+\end{equation}
+
+\paragraph{Checks.}
+$p(0) = 2/3$, \; $p(1^-) = p(1^+) = 1/6$, \; $p(2) = 0$,
+and $\int_{-2}^{2}p(x)\,\de x = 1$.
+
+\subsection{Survival probability}
+
+Integrating~\eqref{eq:uniform-pdf} for $\gamma/a \leq 1$:
+\begin{equation}\label{eq:uniform-P}
+  \boxed{
+  P\!\left(|\Delta| \leq \gamma\right)
+  = \frac{4}{3}\,\frac{\gamma}{a}
+    - \frac{2}{3}\left(\frac{\gamma}{a}\right)^{\!3}
+    + \frac{1}{4}\left(\frac{\gamma}{a}\right)^{\!4} .}
+\end{equation}
+For small $\gamma/a$:
+\begin{equation}
+  P(|\Delta|\leq\gamma) \;\approx\; \frac{4\gamma}{3a} .
+\end{equation}
+
+\subsection{Application to the code}
+
+In the \texttt{uniform} FMC mode the frequencies are
+$\omega_i = i/(N-1)$ for $i=0,\dots,N-1$, so $a = 1$ and
+$\gamma = 1/(N{-}1)$.  Therefore the fraction of active quartets scales as
+\begin{equation}
+  \frac{n_{\rm active}}{\binom{N}{4}}
+  \;\approx\; \frac{4}{3}\,\frac{1}{N-1}
+  \;\xrightarrow{N\to\infty}\; \frac{4}{3N},
+  \qquad
+  n_{\rm active} \;\sim\; \frac{N^3}{18} .
+\end{equation}
+Growth is $O(N^3)$ instead of $O(N^4)$: the filter is very selective at
+large~$N$.
+
+\paragraph{Remark (deterministic vs random).}
+The estimate above holds also for \emph{random} i.i.d.\ uniform
+frequencies in the large--$N$ limit, since the empirical spacing
+concentrates around $1/(N{-}1)$.
+
+%======================================================================
+\section{Gaussian frequencies: $\omega_i \sim \mathcal{N}(\mu,\sigma^2)$}
+%======================================================================
+
+The linear combination~\eqref{eq:Delta} is exactly Gaussian:
+\begin{equation}
+  \Delta \;\sim\; \mathcal{N}(0,\; 4\sigma^2) ,
+\end{equation}
+hence
+\begin{equation}\label{eq:gauss-P}
+  \boxed{
+  P\!\left(|\Delta|\leq\gamma\right)
+  = \operatorname{erf}\!\left(\frac{\gamma}{2\sqrt{2}\,\sigma}\right) .}
+\end{equation}
+
+%======================================================================
+\section{Comb--like frequencies}
+%======================================================================
+
+In the \texttt{comb} mode the frequencies are $\omega_i = i$ (integers),
+$\gamma = 0$, and the FMC condition becomes the exact resonance
+\begin{equation}
+  \omega_j + \omega_k = \omega_i + \omega_l .
+\end{equation}
+The number of solutions for sorted $i<j<k<l$ in $\{0,\dots,N{-}1\}$
+can be counted combinatorially; it grows as $O(N^3/12)$.
+
+%======================================================================
+\section{Summary}
+%======================================================================
+
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lcc}
+\hline
+Distribution & $p_\Delta(0)$ & $P(|\Delta|\leq\gamma)$ for small $\gamma$ \\
+\hline
+$U[0,a]$   & $2/(3a)$ & $4\gamma/(3a)$ \\
+$\mathcal{N}(\mu,\sigma^2)$ & $1/(2\sqrt{2\pi}\,\sigma)$
+  & $\gamma/(\sqrt{2\pi}\,\sigma)$ \\
+\hline
+\end{tabular}
+\end{center}
+
+In all cases $P \propto \gamma$ for small $\gamma$, with proportionality
+constant $2\,p_\Delta(0)$.
+
+\end{document}

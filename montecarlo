@@ -11,6 +11,7 @@ SAVE_FREQ=64
 SHOW_OUTPUT=0
 LABEL=""
 DEV=""
+FMC=""
 
 # Parse arguments
 for arg in "$@"; do
@@ -24,6 +25,7 @@ for arg in "$@"; do
         --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
         --label=*)     LABEL="${arg#*=}" ;;
         --dev=*)        DEV="${arg#*=}" ;;
+        --fmc=*)        FMC="${arg#*=}" ;;
         --show-output) SHOW_OUTPUT=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
@@ -36,6 +38,7 @@ for arg in "$@"; do
             echo "  --save_freq=K Save every K iterations (default: $SAVE_FREQ)"
             echo "  --label=L     Sample label (default: none)"
             echo "  --dev=D       GPU device index (default: all visible)"
+            echo "  --fmc=M       FMC mode: 0=FC, 1=comb, 2=uniform (default: 0)"
             echo "  --show-output Print progress to stdout"
             exit 0
             ;;
@@ -68,4 +71,9 @@ if [ -n "$DEV" ]; then
     echo "Using GPU device: $DEV"
 fi
 
-./bin/pspin24 -N "$SIZE" -T "$TEMP" -J "$J" -iter "$MC_ITER" -seed "$SEED" -nrep "$NREP" -save_freq "$SAVE_FREQ" $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG
+FMC_FLAG=""
+if [ -n "$FMC" ]; then
+    FMC_FLAG="-fmc $FMC"
+fi
+
+./bin/pspin24 -N "$SIZE" -T "$TEMP" -J "$J" -iter "$MC_ITER" -seed "$SEED" -nrep "$NREP" -save_freq "$SAVE_FREQ" $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG

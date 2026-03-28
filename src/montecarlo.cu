@@ -76,6 +76,10 @@ int main(int argc, char** argv) {
         printf("T = %.4f, J = %.4f\n", cfg.T, cfg.J);
         printf("MC iterations = %d, save_freq = %d\n", cfg.mc_iterations, cfg.save_freq);
         printf("Seed = %llu\n", (unsigned long long)cfg.seed);
+        if (cfg.fmc_mode > 0) {
+            const char* fmc_names[] = {"FC", "comb", "uniform"};
+            printf("FMC: mode=%s, gamma=%.4f\n", fmc_names[cfg.fmc_mode], cfg.gamma);
+        }
         printf("Pairs: %lld, Quartets: %lld\n", n_pairs(cfg.N), n_quartets(cfg.N));
         printf("Memory: g2=%.1fMB g4=%.1fMB spins=%.1fMB rng+aux=%.1fMB total=%.1fMB\n",
                mem_g2/1e6, mem_g4/1e6, mem_spins/1e6, (mem_rng+mem_aux)/1e6, mem_total/1e6);
@@ -85,6 +89,24 @@ int main(int argc, char** argv) {
 
     // Initialize MC state (disorder + all replicas)
     MCState state = mc_init(cfg);
+
+    // FMC stats and frequency file
+    if (cfg.fmc_mode > 0) {
+        const char* fmc_names[] = {"FC", "comb", "uniform"};
+        printf("FMC: mode=%s gamma=%.4f  pairs=%lld/%lld  quartets=%lld/%lld\n",
+               fmc_names[cfg.fmc_mode], cfg.gamma,
+               state.n_pairs_active, n_pairs(cfg.N),
+               state.n_quart_active, n_quartets(cfg.N));
+        char freqfile[256];
+        snprintf(freqfile, sizeof(freqfile), "%s/frequencies.txt", datadir);
+        FILE* ff = fopen(freqfile, "w");
+        if (ff) {
+            fprintf(ff, "# i omega_i\n");
+            for (int i = 0; i < cfg.N; i++)
+                fprintf(ff, "%d\t%.12f\n", i, state.h_omega[i]);
+            fclose(ff);
+        }
+    }
 
     // Allocate host buffers for results
     double* h_energies = new double[cfg.nrep];

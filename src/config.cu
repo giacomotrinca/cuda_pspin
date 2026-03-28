@@ -25,12 +25,22 @@ SimConfig parse_args(int argc, char** argv) {
             cfg.label = atoi(argv[++i]);
         else if (strcmp(argv[i], "-dev") == 0 && i + 1 < argc)
             cfg.dev = atoi(argv[++i]);
-        else if (strcmp(argv[i], "-verbose") == 0)
-            cfg.verbose = 1;
+        else if (strcmp(argv[i], "-fmc") == 0 && i + 1 < argc)
+            cfg.fmc_mode = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-gamma") == 0 && i + 1 < argc)
+            cfg.gamma = atof(argv[++i]);
+        else if (strcmp(argv[i], "-verbose") == 0) {
+            // Accept optional integer level: -verbose [0|1|2]
+            if (i + 1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
+                cfg.verbose = atoi(argv[++i]);
+            else
+                cfg.verbose = 1;
+        }
         else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             fprintf(stderr, "Usage: %s [-N n] [-nrep n] [-T temp] [-J coupling] "
-                    "[-iter n] [-seed s] [-save_freq k] [-label l] [-dev d] [-verbose]\n",
+                    "[-iter n] [-seed s] [-save_freq k] [-label l] [-dev d] "
+                    "[-fmc 0|1|2] [-gamma g] [-verbose [0|1|2]]\n",
                     argv[0]);
             exit(1);
         }
@@ -39,6 +49,14 @@ SimConfig parse_args(int argc, char** argv) {
     if (cfg.N < 4) {
         fprintf(stderr, "Error: N must be >= 4 for 4-body interactions.\n");
         exit(1);
+    }
+
+    // Set gamma automatically based on FMC mode (if not given via -gamma)
+    if (cfg.fmc_mode > 0 && cfg.gamma <= 0.0) {
+        if (cfg.fmc_mode == 1)
+            cfg.gamma = 0.0;           // comb: exact frequency matching
+        else if (cfg.fmc_mode == 2)
+            cfg.gamma = 1.0 / (cfg.N - 1);  // uniform: 1 spacing
     }
 
     return cfg;

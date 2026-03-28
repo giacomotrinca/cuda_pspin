@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# Launch multiple independent samples of simulated annealing
+# Each sample uses a different seed (= different disorder realisation)
+
+# Default parameters
+SIZE=18
+TMAX=2.0
+TMIN=0.001
+NTEMP=20
+J=1.0
+ITER=13
+SEED=$RANDOM
+NREP=4
+SAVE_FREQ=64
+NSAMPLES=3
+DEV=0
+FMC=1
+GAMMA=""
+SHOW_OUTPUT=1
+
+# Parse arguments
+for arg in "$@"; do
+    case "$arg" in
+        --size=*)      SIZE="${arg#*=}" ;;
+        --tmax=*)      TMAX="${arg#*=}" ;;
+        --tmin=*)      TMIN="${arg#*=}" ;;
+        --ntemp=*)     NTEMP="${arg#*=}" ;;
+        --J=*)         J="${arg#*=}" ;;
+        --iter=*)      ITER="${arg#*=}" ;;
+        --seed=*)      SEED="${arg#*=}" ;;
+        --nrep=*)      NREP="${arg#*=}" ;;
+        --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
+        --nsamples=*)  NSAMPLES="${arg#*=}" ;;
+        --dev=*)       DEV="${arg#*=}" ;;
+        --fmc=*)       FMC="${arg#*=}" ;;
+        --gamma=*)     GAMMA="${arg#*=}" ;;
+        --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "  --size=N       Number of spins (default: $SIZE)"
+            echo "  --tmax=T       Max temperature (default: $TMAX)"
+            echo "  --tmin=T       Min temperature (default: $TMIN)"
+            echo "  --ntemp=N      Number of temperature steps (default: $NTEMP)"
+            echo "  --J=J          Coupling scale (default: $J)"
+            echo "  --iter=K       Sweeps per temp = 2^K (default: $ITER)"
+            echo "  --seed=S       Initial RNG seed (default: random)"
+            echo "  --nrep=R       Number of replicas (default: $NREP)"
+            echo "  --save_freq=K  Save every K iterations (default: $SAVE_FREQ)"
+            echo "  --nsamples=S   Number of disorder samples (default: $NSAMPLES)"
+            echo "  --dev=D        GPU device index (default: $DEV)"
+            echo "  --fmc=M        FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
+            echo "  --gamma=G      FMC gamma (default: auto)"
+            echo "  --show-output=L Print progress: 0=silent 1=temp 2=sweeps (default: $SHOW_OUTPUT)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+SWEEPS=$((1 << ITER))
+
+echo "=== scan_samples_sa ==="
+echo "N=$SIZE  Tmax=$TMAX  Tmin=$TMIN  ntemp=$NTEMP  J=$J"
+echo "sweeps/temp=2^${ITER}=${SWEEPS}  nrep=$NREP  save_freq=$SAVE_FREQ"
+echo "Samples: $NSAMPLES  initial seed: $SEED  dev=$DEV  fmc=$FMC"
+echo ""
+
+for S in $(seq 0 $((NSAMPLES - 1))); do
+    echo "────────────────────────────────────────"
+    echo "Running sample $S / $((NSAMPLES - 1))  (seed=$SEED) ..."
+    echo "────────────────────────────────────────"
+    ./simulated_annealing --size=$SIZE --tmax=$TMAX --tmin=$TMIN --ntemp=$NTEMP --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT
+    echo ""
+    SEED=$((SEED + 1))
+done
+
+echo "=== scan_samples_sa done ==="

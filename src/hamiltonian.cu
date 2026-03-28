@@ -58,8 +58,8 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
 }
 
 // Kernel: compute H4 partial sums
-// H4 = -sum_{i<j<k<l} [ g4_ijkl * a_i * a_j * conj(a_k) * conj(a_l) + c.c. ]
-//     = -2 * sum Re[ g4_ijkl * a_i * a_j * conj(a_k) * conj(a_l) ]
+// H4 = -sum_{i<j<k<l} [ g4_ijkl * a_i * conj(a_j) * a_k * conj(a_l) + c.c. ]
+//     = -2 * sum Re[ g4_ijkl * a_i * conj(a_j) * a_k * conj(a_l) ]
 __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
                                   const cuDoubleComplex* g4,
                                   int N, double* partial_sums) {
@@ -97,12 +97,12 @@ __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
 
         cuDoubleComplex gq = g4[q_idx];
         cuDoubleComplex ai = spins[ii];
-        cuDoubleComplex aj = spins[jj];
-        cuDoubleComplex ak_conj = cuConj(spins[kk]);
+        cuDoubleComplex aj_conj = cuConj(spins[jj]);
+        cuDoubleComplex ak = spins[kk];
         cuDoubleComplex al_conj = cuConj(spins[ll]);
 
-        // g4 * a_i * a_j * conj(a_k) * conj(a_l)
-        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(ai, aj), cuCmul(ak_conj, al_conj)));
+        // g4 * a_i * conj(a_j) * a_k * conj(a_l)
+        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(ai, aj_conj), cuCmul(ak, al_conj)));
         local_sum = -2.0 * cuCreal(prod);
     }
 

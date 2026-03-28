@@ -202,24 +202,24 @@ __global__ void mc_sweep_kernel(
 
             if (is_type3) {
                 // Both i0 and j0 change: full old & new
-                cuDoubleComplex oi = s_spins[ii], oj = s_spins[jj];
-                cuDoubleComplex ok_c = cuConj(s_spins[kk]), ol_c = cuConj(s_spins[ll]);
-                cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj), cuCmul(ok_c, ol_c)));
+                cuDoubleComplex oi = s_spins[ii], oj_c = cuConj(s_spins[jj]);
+                cuDoubleComplex ok = s_spins[kk], ol_c = cuConj(s_spins[ll]);
+                cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj_c), cuCmul(ok, ol_c)));
                 cuDoubleComplex ni = (ii==i0) ? a_i_new : ((ii==j0) ? a_j_new : s_spins[ii]);
                 cuDoubleComplex nj = (jj==i0) ? a_i_new : ((jj==j0) ? a_j_new : s_spins[jj]);
                 cuDoubleComplex nk = (kk==i0) ? a_i_new : ((kk==j0) ? a_j_new : s_spins[kk]);
                 cuDoubleComplex nl = (ll==i0) ? a_i_new : ((ll==j0) ? a_j_new : s_spins[ll]);
-                nk = cuConj(nk); nl = cuConj(nl);
+                nj = cuConj(nj); nl = cuConj(nl);  // positions 1,3 conjugated
                 cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
                 local_dE -= 2.0 * (cuCreal(new_prod) - cuCreal(old_prod));
             } else {
                 // Single spin changes: differential (halves cuCmul count)
                 int changed = (t < n_type12) ? i0 : j0;
                 cuDoubleComplex delta = (changed == i0) ? delta_i : delta_j;
-                // Replace the changed spin with delta (non-conj) or conj(delta) (conj pos)
+                // Positions 0,2 unconjugated; positions 1,3 conjugated
                 cuDoubleComplex f0 = (ii == changed) ? delta : s_spins[ii];
-                cuDoubleComplex f1 = (jj == changed) ? delta : s_spins[jj];
-                cuDoubleComplex f2 = (kk == changed) ? cuConj(delta) : cuConj(s_spins[kk]);
+                cuDoubleComplex f1 = (jj == changed) ? cuConj(delta) : cuConj(s_spins[jj]);
+                cuDoubleComplex f2 = (kk == changed) ? delta : s_spins[kk];
                 cuDoubleComplex f3 = (ll == changed) ? cuConj(delta) : cuConj(s_spins[ll]);
                 cuDoubleComplex diff = cuCmul(gq, cuCmul(cuCmul(f0, f1), cuCmul(f2, f3)));
                 local_dE -= 2.0 * cuCreal(diff);
@@ -237,10 +237,15 @@ __global__ void mc_sweep_kernel(
         if (tid == 0) {
             double dE = 0.0;
             for (int w = 0; w < nwarps; w++) dE += s_warp[w];
-            bool accept = (dE <= 0.0);
-            if (!accept) {
-                double r = curand_uniform_double(&rng);
-                accept = (r < exp(-beta * dE));
+            bool accept;
+            if (beta == 0.0) {
+                accept = true;  // T = inf: accept everything
+            } else {
+                accept = (dE <= 0.0);
+                if (!accept) {
+                    double r = curand_uniform_double(&rng);
+                    accept = (r < exp(-beta * dE));
+                }
             }
             if (accept) {
                 s_spins[i0] = a_i_new;
@@ -319,8 +324,8 @@ __global__ void init_energy_kernel(
 
         cuDoubleComplex gq = g4[q];
         cuDoubleComplex prod = cuCmul(gq, cuCmul(
-            cuCmul(spins[ii], spins[jj]),
-            cuCmul(cuConj(spins[kk]), cuConj(spins[ll]))));
+            cuCmul(spins[ii], cuConj(spins[jj])),
+            cuCmul(spins[kk], cuConj(spins[ll]))));
         local_sum += -2.0 * cuCreal(prod);
     }
 
@@ -361,6 +366,49 @@ MCState mc_init(const SimConfig& cfg) {
     // Generate disorder (same for all replicas, use master seed)
     generate_g2(state.d_g2, N, cfg.J, cfg.seed + 1000);
     generate_g4(state.d_g4, N, cfg.J, cfg.seed + 2000);
+
+    // FMC filtering
+    if (cfg.fmc_mode > 0) {
+        state.h_omega = new double[N];
+        if (cfg.fmc_mode == 1) { // comb: omega_k = k/(N-1), equispaziato in [0,1]
+            for (int i = 0; i < N; i++) state.h_omega[i] = (double)i / (double)(N - 1);
+        } else { // uniform: omega_i ~ U[0,1]
+            uint64_t freq_state = cfg.seed + 3000;
+            for (int i = 0; i < N; i++) {
+                uint64_t z = splitmix64(&freq_state);
+                state.h_omega[i] = (double)(z >> 11) / (double)(1ULL << 53);
+            }
+        }
+        double* d_omega;
+        CUDA_CHECK(cudaMalloc(&d_omega, N * sizeof(double)));
+        CUDA_CHECK(cudaMemcpy(d_omega, state.h_omega, N * sizeof(double), cudaMemcpyHostToDevice));
+        apply_fmc_g2(state.d_g2, N, d_omega, cfg.gamma);
+        apply_fmc_g4(state.d_g4, N, d_omega, cfg.gamma);
+        CUDA_CHECK(cudaFree(d_omega));
+
+        // Count surviving terms
+        cuDoubleComplex* h_g2 = new cuDoubleComplex[N * N];
+        CUDA_CHECK(cudaMemcpy(h_g2, state.d_g2, (long long)N * N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+        state.n_pairs_active = 0;
+        for (int i = 0; i < N; i++)
+            for (int j = i + 1; j < N; j++)
+                if (h_g2[i * N + j].x != 0.0 || h_g2[i * N + j].y != 0.0)
+                    state.n_pairs_active++;
+        delete[] h_g2;
+
+        long long nq_count = n_quartets(N);
+        cuDoubleComplex* h_g4 = new cuDoubleComplex[nq_count];
+        CUDA_CHECK(cudaMemcpy(h_g4, state.d_g4, nq_count * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+        state.n_quart_active = 0;
+        for (long long q = 0; q < nq_count; q++)
+            if (h_g4[q].x != 0.0 || h_g4[q].y != 0.0)
+                state.n_quart_active++;
+        delete[] h_g4;
+    } else {
+        state.h_omega = nullptr;
+        state.n_pairs_active = n_pairs(N);
+        state.n_quart_active = n_quartets(N);
+    }
 
     // Allocate per-replica spins
     CUDA_CHECK(cudaMalloc(&state.d_spins, (long long)nrep * N * sizeof(cuDoubleComplex)));
@@ -414,6 +462,7 @@ MCState mc_init(const SimConfig& cfg) {
 }
 
 void mc_free(MCState& state) {
+    delete[] state.h_omega;
     if (state.d_spins)    CUDA_CHECK(cudaFree(state.d_spins));
     if (state.d_g2)       CUDA_CHECK(cudaFree(state.d_g2));
     if (state.d_g4)       CUDA_CHECK(cudaFree(state.d_g4));
@@ -426,7 +475,7 @@ void mc_free(MCState& state) {
 void mc_sweep(MCState& state, const SimConfig& cfg) {
     int N = state.N;
     int nrep = state.nrep;
-    double beta = 1.0 / cfg.T;
+    double beta = 1.0 / cfg.T;  // T=0 -> inf (greedy), T=inf -> 0 (all accept)
 
     int block_size = 256;
     int nwarps = block_size >> 5;

@@ -17,6 +17,10 @@ struct MCState {
     long long* d_accepted;       // device: accepted moves [nrep]
     long long* d_proposed;       // device: proposed moves [nrep]
 
+    double* h_omega;             // host: frequencies [N] (NULL if FC)
+    long long n_pairs_active;    // active pairs after FMC
+    long long n_quart_active;    // active quartets after FMC
+
     int N;
     int nrep;
 };

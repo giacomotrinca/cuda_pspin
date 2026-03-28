@@ -30,7 +30,6 @@ done
 
 echo "=== analysis launcher ==="
 echo "N=$SIZE  nrep=$NREP"
-echo ""
 
 EXTRA=""
 if [ -n "$DATADIR" ]; then
@@ -40,9 +39,10 @@ fi
 LABEL_FLAG=""
 if [ -n "$LABEL" ]; then
     LABEL_FLAG="-label $LABEL"
-    echo "Data dir: data/N${SIZE}_NR${NREP}_S${LABEL}"
+    echo "Mode: single sample S$LABEL"
 else
-    echo "Data dir: data/N${SIZE}_NR${NREP}"
+    echo "Mode: averaging over all samples"
 fi
+echo ""
 
 exec ./bin/analysis -N "$SIZE" -nrep "$NREP" $LABEL_FLAG $EXTRA

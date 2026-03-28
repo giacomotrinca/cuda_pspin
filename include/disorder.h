@@ -24,4 +24,10 @@ inline long long n_pairs(int N) {
     return (long long)N * (N - 1) / 2;
 }
 
+// Apply FMC filter: zero out g2 pairs where |omega_i - omega_j| > gamma
+void apply_fmc_g2(cuDoubleComplex* d_g2, int N, const double* d_omega, double gamma);
+
+// Apply FMC filter: zero out g4 quartets (i<j<k<l) where |omega_j - omega_i + omega_k - omega_l| > gamma
+void apply_fmc_g4(cuDoubleComplex* d_g4, int N, const double* d_omega, double gamma);
+
 #endif
