@@ -484,6 +484,163 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
+    // History block averaging (doubling blocks)
+    // ================================================================
+    // For each doubling block (sizes 1, 2, 4, ..., M/2), compute mean energy
+    // and acceptance. Jackknife over samples, average over replicas.
+    // Output: history_nr{r}.dat, history_mean.dat
+    // Columns: sweep_block  energy  err  accept_mc  err
+    {
+        char outdir_h[256];
+        snprintf(outdir_h, sizeof(outdir_h), "analysis/MC_N%d_NR%d", N, nrep);
+        mkdir_p(outdir_h);
+
+        // Re-read all sample data
+        std::vector<std::vector<DataPoint>> all_data(S);
+        int M_ref = 0;
+        for (int s = 0; s < S; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/N%d_NR%d_S%d", N, nrep, labels_valid[s]);
+            all_data[s] = read_data(sdir, nrep);
+            if (s == 0) M_ref = (int)all_data[s].size();
+        }
+
+        // Count doubling blocks
+        int nblocks = 0;
+        { int sz = 1; int pos = 0; while (pos < M_ref) { pos += sz; sz *= 2; nblocks++; } }
+
+        printf("\n── History block averaging ─────────────────────────\n");
+        printf("  data points (ref): %d   doubling blocks: %d\n", M_ref, nblocks);
+
+        // Per-replica history files
+        for (int r = 0; r < nrep; r++) {
+            char outfile[512];
+            snprintf(outfile, sizeof(outfile), "%s/history_nr%d.dat", outdir_h, r);
+            FILE* fout = fopen(outfile, "w");
+            if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); continue; }
+
+            fprintf(fout, "# History block averaging (doubling blocks)\n");
+            fprintf(fout, "# N=%d nrep=%d replica=%d nsamples=%d T=%.8f\n", N, nrep, r, S, T_sim);
+            fprintf(fout, "# Columns: sweep_block  energy  err  accept_mc  err\n");
+
+            int bsize = 1, pos = 0;
+            for (int b = 0; b < nblocks && pos < M_ref; b++) {
+                int bend = pos + bsize;
+                if (bend > M_ref) bend = M_ref;
+                int sweep_end = all_data[0][bend - 1].iter;
+
+                std::vector<double> sE(S, 0), sA(S, 0);
+                for (int s = 0; s < S; s++) {
+                    int Ms = (int)all_data[s].size();
+                    int p = pos, be = bend;
+                    if (be > Ms) be = Ms;
+                    if (p >= Ms) continue;
+                    int nn = be - p;
+                    double se = 0, sa = 0;
+                    for (int i = p; i < be; i++) {
+                        se += all_data[s][i].energy[r];
+                        sa += all_data[s][i].acc[r];
+                    }
+                    sE[s] = se / nn;
+                    sA[s] = sa / nn;
+                }
+
+                double fE = 0, fA = 0;
+                for (int s = 0; s < S; s++) { fE += sE[s]; fA += sA[s]; }
+                fE /= S; fA /= S;
+
+                double jE = 0, jA = 0;
+                for (int j = 0; j < S; j++) {
+                    double lE = 0, lA = 0;
+                    for (int s = 0; s < S; s++) {
+                        if (s == j) continue;
+                        lE += sE[s]; lA += sA[s];
+                    }
+                    lE /= (S - 1); lA /= (S - 1);
+                    jE += (lE - fE) * (lE - fE);
+                    jA += (lA - fA) * (lA - fA);
+                }
+                jE = sqrt((S - 1.0) / S * jE);
+                jA = sqrt((S - 1.0) / S * jA);
+
+                fprintf(fout, "%d\t%.8f\t%.8f\t%.5f\t%.5f\n", sweep_end, fE, jE, fA, jA);
+
+                pos = bend;
+                bsize *= 2;
+            }
+            fclose(fout);
+            printf("  Written %s\n", outfile);
+        }
+
+        // Replica-averaged history file
+        {
+            char outfile[512];
+            snprintf(outfile, sizeof(outfile), "%s/history_mean.dat", outdir_h);
+            FILE* fout = fopen(outfile, "w");
+            if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); }
+            else {
+                fprintf(fout, "# History block averaging (doubling blocks) — replica averaged\n");
+                fprintf(fout, "# N=%d nrep=%d nsamples=%d T=%.8f\n", N, nrep, S, T_sim);
+                fprintf(fout, "# Columns: sweep_block  energy  err  accept_mc  err\n");
+
+                int bsize = 1, pos = 0;
+                int b = 0;
+                while (pos < M_ref) {
+                    int bend = pos + bsize;
+                    if (bend > M_ref) bend = M_ref;
+                    int sweep_end = all_data[0][bend - 1].iter;
+
+                    std::vector<double> smE(S, 0), smA(S, 0);
+                    for (int s = 0; s < S; s++) {
+                        int Ms = (int)all_data[s].size();
+                        int p = pos, be = bend;
+                        if (be > Ms) be = Ms;
+                        if (p >= Ms) continue;
+                        int nn = be - p;
+                        for (int r = 0; r < nrep; r++) {
+                            double se = 0, sa = 0;
+                            for (int i = p; i < be; i++) {
+                                se += all_data[s][i].energy[r];
+                                sa += all_data[s][i].acc[r];
+                            }
+                            smE[s] += se / nn;
+                            smA[s] += sa / nn;
+                        }
+                        smE[s] /= nrep;
+                        smA[s] /= nrep;
+                    }
+
+                    double fE = 0, fA = 0;
+                    for (int s = 0; s < S; s++) { fE += smE[s]; fA += smA[s]; }
+                    fE /= S; fA /= S;
+
+                    double jE = 0, jA = 0;
+                    for (int j = 0; j < S; j++) {
+                        double lE = 0, lA = 0;
+                        for (int s = 0; s < S; s++) {
+                            if (s == j) continue;
+                            lE += smE[s]; lA += smA[s];
+                        }
+                        lE /= (S - 1); lA /= (S - 1);
+                        jE += (lE - fE) * (lE - fE);
+                        jA += (lA - fA) * (lA - fA);
+                    }
+                    jE = sqrt((S - 1.0) / S * jE);
+                    jA = sqrt((S - 1.0) / S * jA);
+
+                    fprintf(fout, "%d\t%.8f\t%.8f\t%.5f\t%.5f\n", sweep_end, fE, jE, fA, jA);
+
+                    pos = bend;
+                    bsize *= 2;
+                    b++;
+                }
+                fclose(fout);
+                printf("  Written %s\n", outfile);
+            }
+        }
+    }
+
+    // ================================================================
     // Intensity Spectrum
     // ================================================================
     {
@@ -609,14 +766,11 @@ int main(int argc, char** argv) {
 
             if (!blocks.empty()) {
                 Plot2D plot;
-                plot.xlabel("Frequency {/Symbol w}");
-                plot.ylabel("Emission intensity  I_k");
-                plot.fontName("Helvetica");
-                plot.fontSize(16);
+                plot.xlabel("{/Times-Italic {/Symbol w}}");
+                plot.ylabel("{/Times-Italic I}_{/Times-Italic k}");
+                plot.fontName("Times");
+                plot.fontSize(18);
                 plot.legend().hide();
-                plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                plot.gnuplot("set border lw 1.5");
-                plot.gnuplot("set tics font 'Helvetica,13'");
                 int nb = (int)blocks.size();
                 double Tmin = blocks.back()[0].T;
                 double Tmax = blocks.front()[0].T;
@@ -624,7 +778,7 @@ int main(int argc, char** argv) {
                 char cbr[128];
                 snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                 plot.gnuplot(cbr);
-                plot.gnuplot("set cblabel 'T' font 'Helvetica,14'");
+                plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
                 plot.gnuplot("set colorbox");
                 for (int bi = 0; bi < nb; bi++) {
                     auto& bl = blocks[bi];
@@ -643,6 +797,67 @@ int main(int argc, char** argv) {
                 char pf[512]; snprintf(pf, sizeof(pf), "%s/intensity_spectrum.png", plotdir);
                 canvas.save(pf);
                 printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- History plots (from history_mean.dat) ---
+        {
+            char histfile[512];
+            snprintf(histfile, sizeof(histfile), "%s/history_mean.dat", outdir);
+            FILE* fh = fopen(histfile, "r");
+            if (fh) {
+                struct HistLine { int sweep; double E, Eerr, A, Aerr; };
+                std::vector<HistLine> hdata;
+                char line[512];
+                while (fgets(line, sizeof(line), fh)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    HistLine hl;
+                    if (sscanf(line, "%d %lf %lf %lf %lf",
+                               &hl.sweep, &hl.E, &hl.Eerr, &hl.A, &hl.Aerr) == 5)
+                        hdata.push_back(hl);
+                }
+                fclose(fh);
+
+                if (!hdata.empty()) {
+                    int nh = (int)hdata.size();
+
+                    auto make_history_plot = [&](const char* ylabel_str,
+                                                 int val_col,
+                                                 const char* outname) {
+                        Plot2D plot;
+                        plot.xlabel("sweep");
+                        plot.ylabel(ylabel_str);
+                        plot.fontName("Times");
+                        plot.fontSize(18);
+                        plot.legend().hide();
+                        plot.gnuplot("set logscale x 2");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+
+                        std::vector<double> vx(nh), vy(nh), vlo(nh), vhi(nh);
+                        for (int i = 0; i < nh; i++) {
+                            vx[i] = hdata[i].sweep;
+                            double v = (val_col == 0) ? hdata[i].E : hdata[i].A;
+                            double e = (val_col == 0) ? hdata[i].Eerr : hdata[i].Aerr;
+                            vy[i] = v;
+                            vlo[i] = v - e;
+                            vhi[i] = v + e;
+                        }
+                        plot.drawCurvesFilled(vx, vlo, vhi)
+                            .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
+                            .lineColor("#4393c3").lineWidth(0).labelNone();
+                        plot.drawCurve(vx, vy)
+                            .lineColor("#2166ac").lineWidth(2.5).label("");
+                        Figure fig = {{plot}};
+                        Canvas canvas = {{fig}};
+                        canvas.size(1800, 1200);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/%s", plotdir, outname);
+                        canvas.save(pf);
+                        printf("  Written %s\n", pf);
+                    };
+
+                    make_history_plot("{/Times-Italic E} / {/Times-Italic N}", 0, "energy_history.png");
+                    make_history_plot("MC acceptance", 1, "acceptance_history.png");
+                }
             }
         }
     }

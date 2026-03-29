@@ -10,7 +10,7 @@ NVFLAGS = -std=c++11 -arch=sm_70 -O3 -Iinclude -DNDEBUG
 CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 
-.PHONY: all clean mc sa pt analysis_mc analysis_sa analysis_pt
+.PHONY: all clean mc sa pt analysis_mc analysis_sa analysis_pt bench bench_plot
 
 all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
      bin/analysis bin/analysis_sa bin/analysis_pt
@@ -22,6 +22,8 @@ pt:           dirs bin/parallel_tempering
 analysis_mc:  dirs bin/analysis
 analysis_sa:  dirs bin/analysis_sa
 analysis_pt:  dirs bin/analysis_pt
+bench:        dirs bin/benchmark
+bench_plot:   dirs bin/plot_benchmark
 
 dirs:
 	@mkdir -p bin obj
@@ -37,6 +39,9 @@ bin/simulated_annealing: obj/simulated_annealing.o $(LIB_OBJ) | dirs
 bin/parallel_tempering: obj/parallel_tempering.o $(LIB_OBJ) | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
+bin/benchmark: obj/benchmark.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
 # --- C++ analysis ---
 
 bin/analysis: src/analysis.cpp | dirs
@@ -46,6 +51,9 @@ bin/analysis_sa: src/analysis_sa.cpp | dirs
 	$(CXX) $(CXFLAGS) -o $@ $< -lm
 
 bin/analysis_pt: src/analysis_pt.cpp | dirs
+	$(CXX) $(CXFLAGS) -o $@ $< -lm
+
+bin/plot_benchmark: src/plot_benchmark.cpp | dirs
 	$(CXX) $(CXFLAGS) -o $@ $< -lm
 
 # --- pattern rule for .cu -> .o ---

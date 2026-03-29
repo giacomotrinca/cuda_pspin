@@ -5,17 +5,23 @@
 SIZE=18
 NT=50
 NREP=1
+NBINS=100
+NTHREADS=$(nproc)
 
 for arg in "$@"; do
     case "$arg" in
-        --size=*)   SIZE="${arg#*=}" ;;
-        --nt=*)     NT="${arg#*=}" ;;
-        --nrep=*)   NREP="${arg#*=}" ;;
+        --size=*)     SIZE="${arg#*=}" ;;
+        --nt=*)       NT="${arg#*=}" ;;
+        --nrep=*)     NREP="${arg#*=}" ;;
+        --nbins=*)    NBINS="${arg#*=}" ;;
+        --nthreads=*) NTHREADS="${arg#*=}" ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
-            echo "  --size=N    Number of spins (default: $SIZE)"
-            echo "  --nt=NT     Number of temperatures (default: $NT)"
-            echo "  --nrep=R    Number of replicas per temperature (default: $NREP)"
+            echo "  --size=N      Number of spins (default: $SIZE)"
+            echo "  --nt=NT       Number of temperatures (default: $NT)"
+            echo "  --nrep=R      Number of replicas per temperature (default: $NREP)"
+            echo "  --nbins=B     Number of bins for overlap histogram (default: $NBINS)"
+            echo "  --nthreads=T  Threads for overlap computation (default: $(nproc))"
             exit 0
             ;;
         *)
@@ -25,4 +31,4 @@ for arg in "$@"; do
     esac
 done
 
-./bin/analysis_pt -N "$SIZE" -NT "$NT" -nrep "$NREP"
+./bin/analysis_pt -N "$SIZE" -NT "$NT" -nrep "$NREP" -nbins "$NBINS" -nthreads "$NTHREADS" --plot

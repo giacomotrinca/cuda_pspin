@@ -414,6 +414,160 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
+    // History block averaging
+    // ================================================================
+    {
+        int M_ref = (int)all_data[ref][0].energy.size();
+        int nblocks = 0;
+        { int sz = 1; int pos = 0; while (pos < M_ref) { pos += sz; sz *= 2; nblocks++; } }
+
+        // Per-replica history files
+        for (int r = 0; r < nrep; r++) {
+            char outfile[512];
+            snprintf(outfile, sizeof(outfile), "%s/history_nr%d.dat", outdir, r);
+            FILE* fout = fopen(outfile, "w");
+            if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); continue; }
+
+            fprintf(fout, "# History block averaging (doubling blocks)\n");
+            fprintf(fout, "# N=%d nrep=%d replica=%d nsamples=%d\n", N, nrep, r, nsamples);
+            fprintf(fout, "# Columns: sweep_block  energy  err  accept_mc  err  temperature\n");
+            fprintf(fout, "# %d temperature blocks separated by blank lines\n", ntemps);
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                if (ti > 0) fprintf(fout, "\n");
+
+                int M = (int)all_data[ref][ti].energy.size();
+                int bsize = 1, pos = 0;
+                for (int b = 0; b < nblocks && pos < M; b++) {
+                    int bend = pos + bsize;
+                    if (bend > M) bend = M;
+                    int sweep_end = all_data[ref][ti].sweeps[bend - 1];
+
+                    std::vector<double> sE(nsamples, 0), sA(nsamples, 0);
+                    for (int s = 0; s < nsamples; s++) {
+                        if (ti >= (int)all_data[s].size()) continue;
+                        auto& tb = all_data[s][ti];
+                        int Ms = (int)tb.energy.size();
+                        int p = pos, be = bend;
+                        if (be > Ms) be = Ms;
+                        if (p >= Ms) continue;
+                        int nn = be - p;
+                        double se = 0, sa = 0;
+                        for (int i = p; i < be; i++) {
+                            se += tb.energy[i][r];
+                            sa += tb.acc[i][r];
+                        }
+                        sE[s] = se / nn;
+                        sA[s] = sa / nn;
+                    }
+
+                    double fE = 0, fA = 0;
+                    for (int s = 0; s < nsamples; s++) { fE += sE[s]; fA += sA[s]; }
+                    fE /= nsamples; fA /= nsamples;
+
+                    double jE = 0, jA = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lE = 0, lA = 0;
+                        for (int s = 0; s < nsamples; s++) {
+                            if (s == j) continue;
+                            lE += sE[s]; lA += sA[s];
+                        }
+                        lE /= (nsamples - 1); lA /= (nsamples - 1);
+                        jE += (lE - fE) * (lE - fE);
+                        jA += (lA - fA) * (lA - fA);
+                    }
+                    jE = sqrt((nsamples - 1.0) / nsamples * jE);
+                    jA = sqrt((nsamples - 1.0) / nsamples * jA);
+
+                    fprintf(fout, "%d\t%.8f\t%.8f\t%.5f\t%.5f\t%.8f\n",
+                            sweep_end, fE, jE, fA, jA, T);
+
+                    pos = bend;
+                    bsize *= 2;
+                }
+            }
+            fclose(fout);
+            printf("  Written %s\n", outfile);
+        }
+
+        // Replica-averaged history file
+        {
+            char outfile[512];
+            snprintf(outfile, sizeof(outfile), "%s/history_mean.dat", outdir);
+            FILE* fout = fopen(outfile, "w");
+            if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); }
+            else {
+                fprintf(fout, "# History block averaging (doubling blocks) — replica averaged\n");
+                fprintf(fout, "# N=%d nrep=%d nsamples=%d\n", N, nrep, nsamples);
+                fprintf(fout, "# Columns: sweep_block  energy  err  accept_mc  err  temperature\n");
+                fprintf(fout, "# %d temperature blocks separated by blank lines\n", ntemps);
+
+                for (int ti = 0; ti < ntemps; ti++) {
+                    double T = all_data[ref][ti].T;
+                    if (ti > 0) fprintf(fout, "\n");
+
+                    int M = (int)all_data[ref][ti].energy.size();
+                    int bsize = 1, pos = 0;
+                    while (pos < M) {
+                        int bend = pos + bsize;
+                        if (bend > M) bend = M;
+                        int sweep_end = all_data[ref][ti].sweeps[bend - 1];
+
+                        std::vector<double> smE(nsamples, 0), smA(nsamples, 0);
+                        for (int s = 0; s < nsamples; s++) {
+                            if (ti >= (int)all_data[s].size()) continue;
+                            auto& tb = all_data[s][ti];
+                            int Ms = (int)tb.energy.size();
+                            int p = pos, be = bend;
+                            if (be > Ms) be = Ms;
+                            if (p >= Ms) continue;
+                            int nn = be - p;
+                            for (int r = 0; r < nrep; r++) {
+                                double se = 0, sa = 0;
+                                for (int i = p; i < be; i++) {
+                                    se += tb.energy[i][r];
+                                    sa += tb.acc[i][r];
+                                }
+                                smE[s] += se / nn;
+                                smA[s] += sa / nn;
+                            }
+                            smE[s] /= nrep;
+                            smA[s] /= nrep;
+                        }
+
+                        double fE = 0, fA = 0;
+                        for (int s = 0; s < nsamples; s++) { fE += smE[s]; fA += smA[s]; }
+                        fE /= nsamples; fA /= nsamples;
+
+                        double jE = 0, jA = 0;
+                        for (int j = 0; j < nsamples; j++) {
+                            double lE = 0, lA = 0;
+                            for (int s = 0; s < nsamples; s++) {
+                                if (s == j) continue;
+                                lE += smE[s]; lA += smA[s];
+                            }
+                            lE /= (nsamples - 1); lA /= (nsamples - 1);
+                            jE += (lE - fE) * (lE - fE);
+                            jA += (lA - fA) * (lA - fA);
+                        }
+                        jE = sqrt((nsamples - 1.0) / nsamples * jE);
+                        jA = sqrt((nsamples - 1.0) / nsamples * jA);
+
+                        fprintf(fout, "%d\t%.8f\t%.8f\t%.5f\t%.5f\t%.8f\n",
+                                sweep_end, fE, jE, fA, jA, T);
+
+                        pos = bend;
+                        bsize *= 2;
+                    }
+                }
+                fclose(fout);
+                printf("  Written %s\n", outfile);
+            }
+        }
+    }
+
+    // ================================================================
     // Intensity Spectrum
     // ================================================================
     {
@@ -543,14 +697,11 @@ int main(int argc, char** argv) {
 
                 if (!blocks.empty()) {
                     Plot2D plot;
-                    plot.xlabel("Frequency {/Symbol w}");
-                    plot.ylabel("Emission intensity  I_k");
-                    plot.fontName("Helvetica");
-                    plot.fontSize(16);
+                    plot.xlabel("{/Times-Italic {/Symbol w}}");
+                    plot.ylabel("{/Times-Italic I}_{/Times-Italic k}");
+                    plot.fontName("Times");
+                    plot.fontSize(18);
                     plot.legend().hide();
-                    plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                    plot.gnuplot("set border lw 1.5");
-                    plot.gnuplot("set tics font 'Helvetica,13'");
                     int nb = (int)blocks.size();
                     double Tmin = blocks.back()[0].T;
                     double Tmax = blocks.front()[0].T;
@@ -558,7 +709,7 @@ int main(int argc, char** argv) {
                     char cbr[128];
                     snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                     plot.gnuplot(cbr);
-                    plot.gnuplot("set cblabel 'T' font 'Helvetica,14'");
+                    plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
                     plot.gnuplot("set colorbox");
                     for (int bi = 0; bi < nb; bi++) {
                         auto& bl = blocks[bi];
@@ -614,12 +765,10 @@ int main(int argc, char** argv) {
                     // Energy
                     {
                         Plot2D plot;
-                        plot.xlabel("Temperature T"); plot.ylabel("Energy  E/N");
-                        plot.fontName("Helvetica"); plot.fontSize(16);
+                        plot.xlabel("{/Times-Italic T}"); plot.ylabel("{/Times-Italic E} / {/Times-Italic N}");
+                        plot.fontName("Times"); plot.fontSize(18);
                         plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                        plot.gnuplot("set border lw 1.5");
-                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vElo, vEhi)
                             .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
                             .lineColor("#4393c3").lineWidth(0).labelNone();
@@ -632,12 +781,10 @@ int main(int argc, char** argv) {
                     // MC Acceptance
                     {
                         Plot2D plot;
-                        plot.xlabel("Temperature T"); plot.ylabel("MC acceptance rate");
-                        plot.fontName("Helvetica"); plot.fontSize(16);
+                        plot.xlabel("{/Times-Italic T}"); plot.ylabel("MC acceptance");
+                        plot.fontName("Times"); plot.fontSize(18);
                         plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                        plot.gnuplot("set border lw 1.5");
-                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vAlo, vAhi)
                             .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
                             .lineColor("#66c2a5").lineWidth(0).labelNone();
@@ -650,12 +797,10 @@ int main(int argc, char** argv) {
                     // Specific heat
                     {
                         Plot2D plot;
-                        plot.xlabel("Temperature T"); plot.ylabel("Specific heat  C_v");
-                        plot.fontName("Helvetica"); plot.fontSize(16);
+                        plot.xlabel("{/Times-Italic T}"); plot.ylabel("{/Times-Italic C}_{/Times-Italic v}");
+                        plot.fontName("Times"); plot.fontSize(18);
                         plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                        plot.gnuplot("set border lw 1.5");
-                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vCvlo, vCvhi)
                             .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
                             .lineColor("#f4a582").lineWidth(0).labelNone();
@@ -665,6 +810,85 @@ int main(int argc, char** argv) {
                         char pf[512]; snprintf(pf, sizeof(pf), "%s/specific_heat.png", plotdir);
                         canvas.save(pf); printf("  Written %s\n", pf);
                     }
+                }
+            }
+        }
+
+        // --- 3) History plots (from history_mean.dat) ---
+        {
+            char histfile[512];
+            snprintf(histfile, sizeof(histfile), "%s/history_mean.dat", outdir);
+            FILE* f = fopen(histfile, "r");
+            if (f) {
+                struct HistLine { int sweep; double E, Eerr, A, Aerr, T; };
+                std::vector<std::vector<HistLine>> blocks;
+                std::vector<HistLine> cur;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#') continue;
+                    if (line[0] == '\n' || line[0] == '\r') {
+                        if (!cur.empty()) { blocks.push_back(cur); cur.clear(); }
+                        continue;
+                    }
+                    HistLine hl;
+                    if (sscanf(line, "%d %lf %lf %lf %lf %lf",
+                               &hl.sweep, &hl.E, &hl.Eerr, &hl.A, &hl.Aerr, &hl.T) == 6)
+                        cur.push_back(hl);
+                }
+                if (!cur.empty()) blocks.push_back(cur);
+                fclose(f);
+
+                if (!blocks.empty()) {
+                    int nb = (int)blocks.size();
+                    double Tmin = 1e30, Tmax = -1e30;
+                    for (auto& bl : blocks) {
+                        if (bl[0].T < Tmin) Tmin = bl[0].T;
+                        if (bl[0].T > Tmax) Tmax = bl[0].T;
+                    }
+
+                    auto make_history_plot = [&](const char* ylabel_str,
+                                                 int val_col,
+                                                 const char* outname) {
+                        Plot2D plot;
+                        plot.xlabel("sweep");
+                        plot.ylabel(ylabel_str);
+                        plot.fontName("Times");
+                        plot.fontSize(18);
+                        plot.legend().hide();
+                        plot.gnuplot("set logscale x 2");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                        plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                        char cbr[128];
+                        snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
+                        plot.gnuplot(cbr);
+                        plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
+                        plot.gnuplot("set colorbox");
+
+                        for (int bi = 0; bi < nb; bi++) {
+                            auto& bl = blocks[bi];
+                            int n = (int)bl.size();
+                            std::vector<double> vx(n), vy(n);
+                            for (int i = 0; i < n; i++) {
+                                vx[i] = bl[i].sweep;
+                                if (val_col == 0) vy[i] = bl[i].E;
+                                else vy[i] = bl[i].A;
+                            }
+                            double frac = (Tmax > Tmin) ? (bl[0].T - Tmin) / (Tmax - Tmin) : 0.5;
+                            plot.drawCurve(vx, vy)
+                                .lineColor(temp_color(frac))
+                                .lineWidth(2)
+                                .label("");
+                        }
+                        Figure fig = {{plot}};
+                        Canvas canvas = {{fig}};
+                        canvas.size(1800, 1200);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/%s", plotdir, outname);
+                        canvas.save(pf);
+                        printf("  Written %s\n", pf);
+                    };
+
+                    make_history_plot("{/Times-Italic E} / {/Times-Italic N}", 0, "energy_history.png");
+                    make_history_plot("MC acceptance", 1, "acceptance_history.png");
                 }
             }
         }

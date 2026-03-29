@@ -170,10 +170,8 @@ int main(int argc, char** argv) {
         printf("  %-22s %.1f MB (%.0f MB free / %.0f MB)\n", "memory",
                mem_total/1e6, free_mem/1e6, total_mem/1e6);
         printf("\n");
-        box_sec("Temperature Schedule");
-        for (int t = 0; t < NT; t++)
-            printf("  T[%2d] = %.6f  (beta = %.6f)\n", t, T_sched[t], beta_sched[t]);
-        printf("\n");
+        printf("  %-22s %d temperatures in [%.6f, %.6f]\n\n",
+               "schedule", NT, T_sched[NT - 1], T_sched[0]);
     }
 
     // --- Initialize MCState (all replicas, shared disorder) ---

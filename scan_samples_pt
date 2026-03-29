@@ -6,8 +6,8 @@
 # Default parameters
 SIZE=18
 TMAX=0.7
-TMIN=0.001
-NT=50
+TMIN=0.1
+NT=36
 J=1.0
 ITER=20
 SEED=$RANDOM

@@ -22,6 +22,8 @@
 #include <map>
 #include <string>
 #include <algorithm>
+#include <thread>
+#include <atomic>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sciplot/sciplot.hpp>
@@ -94,6 +96,44 @@ static bool read_config_intensities(const char* filename, int N,
     return true;
 }
 
+// Read a binary config and return raw complex amplitudes (re, im) pairs
+static bool read_config_spins(const char* filename, int N,
+                              std::vector<double>& re, std::vector<double>& im) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) return false;
+    std::vector<double> buf(2 * N);
+    size_t nr = fread(buf.data(), sizeof(double), 2 * N, f);
+    fclose(f);
+    if ((int)nr != 2 * N) return false;
+    re.resize(N);
+    im.resize(N);
+    for (int k = 0; k < N; k++) {
+        re[k] = buf[2*k];
+        im[k] = buf[2*k + 1];
+    }
+    return true;
+}
+
+// Find all iteration numbers for a given (tidx, rep) in the config directory
+static std::vector<int> find_config_iters(const char* confdir, int tidx, int rep) {
+    std::vector<int> iters;
+    char prefix[128];
+    snprintf(prefix, sizeof(prefix), "conf_T%d_r%d_iter", tidx, rep);
+    int plen = (int)strlen(prefix);
+    DIR* dir = opendir(confdir);
+    if (!dir) return iters;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (strncmp(ent->d_name, prefix, plen) == 0) {
+            int it = atoi(ent->d_name + plen);
+            if (it > 0) iters.push_back(it);
+        }
+    }
+    closedir(dir);
+    std::sort(iters.begin(), iters.end());
+    return iters;
+}
+
 // Find config files matching conf_T{tidx}_r{rep}_iter*.bin in confdir
 static std::vector<std::string> find_configs_pt(const char* confdir,
                                                 int tidx, int rep) {
@@ -145,11 +185,20 @@ struct TempBlock {
     std::vector<std::vector<double>> acc;
 };
 
-// Per-temperature-pair exchange data for one sample
+// Per-temperature-pair exchange data for one sample (cumulative)
 struct ExBlock {
     int tidx;
     double T_high, T_low;
     long long total_acc, total_prop;
+};
+
+// Per-temperature-pair exchange data, per-sweep (for history block averaging)
+struct ExSweepBlock {
+    int tidx;
+    double T_high, T_low;
+    std::vector<int> sweeps;
+    std::vector<long long> n_acc;   // per sweep
+    std::vector<long long> n_prop;  // per sweep
 };
 
 // Read energy_accept.txt, return grouped by temperature index
@@ -263,6 +312,49 @@ static std::vector<ExBlock> read_exchange_data(const char* datadir) {
     return exvec;
 }
 
+// Read exchanges.txt, return per-sweep exchange data per temperature pair
+static std::vector<ExSweepBlock> read_exchange_sweep_data(const char* datadir) {
+    char infile[512];
+    snprintf(infile, sizeof(infile), "%s/exchanges.txt", datadir);
+    FILE* fin = fopen(infile, "r");
+    if (!fin) return {};
+
+    std::map<int, int> tidx_to_block;
+    std::vector<ExSweepBlock> blocks;
+    char line[1024];
+    while (fgets(line, sizeof(line), fin)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        int sweep, tidx;
+        double T_high, T_low, rate;
+        long long n_acc, n_prop;
+        if (sscanf(line, "%d %d %lf %lf %lld %lld %lf",
+                   &sweep, &tidx, &T_high, &T_low, &n_acc, &n_prop, &rate) < 7)
+            continue;
+
+        auto it = tidx_to_block.find(tidx);
+        int idx;
+        if (it == tidx_to_block.end()) {
+            idx = (int)blocks.size();
+            tidx_to_block[tidx] = idx;
+            ExSweepBlock eb;
+            eb.tidx = tidx;
+            eb.T_high = T_high;
+            eb.T_low = T_low;
+            blocks.push_back(eb);
+        } else {
+            idx = it->second;
+        }
+        blocks[idx].sweeps.push_back(sweep);
+        blocks[idx].n_acc.push_back(n_acc);
+        blocks[idx].n_prop.push_back(n_prop);
+    }
+    fclose(fin);
+
+    std::sort(blocks.begin(), blocks.end(),
+              [](const ExSweepBlock& a, const ExSweepBlock& b) { return a.tidx < b.tidx; });
+    return blocks;
+}
+
 // Find all sample directories matching data/PT_N{N}_NT{NT}_NR{nrep}_S*
 static std::vector<int> find_samples(int N, int NT, int nrep) {
     std::vector<int> labels;
@@ -325,12 +417,12 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [--plot]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-nbins <nbins>] [-nthreads <t>] [--plot]\n", prog);
     exit(1);
 }
 
 int main(int argc, char** argv) {
-    int N = 0, NT = 0, nrep = 1;
+    int N = 0, NT = 0, nrep = 1, nbins = 100, nthreads = 0;
     bool do_plot = false;
 
     for (int i = 1; i < argc; i++) {
@@ -340,10 +432,17 @@ int main(int argc, char** argv) {
             NT = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nrep") == 0 && i + 1 < argc)
             nrep = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-nbins") == 0 && i + 1 < argc)
+            nbins = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-nthreads") == 0 && i + 1 < argc)
+            nthreads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--plot") == 0)
             do_plot = true;
         else usage(argv[0]);
     }
+    if (nthreads <= 0)
+        nthreads = (int)std::thread::hardware_concurrency();
+    if (nthreads < 1) nthreads = 1;
     if (N < 4 || NT < 2) usage(argv[0]);
 
     auto labels = find_samples(N, NT, nrep);
@@ -353,7 +452,7 @@ int main(int argc, char** argv) {
     }
     int nsamples = (int)labels.size();
 
-    char outdir[256];
+    char outdir[512];
     snprintf(outdir, sizeof(outdir), "analysis/PT_N%d_NT%d_NR%d", N, NT, nrep);
     mkdir_p(outdir);
 
@@ -370,11 +469,13 @@ int main(int argc, char** argv) {
     // Read all sample data
     std::vector<std::vector<TempBlock>> all_data(nsamples);
     std::vector<std::vector<ExBlock>> all_ex(nsamples);
+    std::vector<std::vector<ExSweepBlock>> all_ex_sweep(nsamples);
     for (int s = 0; s < nsamples; s++) {
-        char sdir[256];
+        char sdir[512];
         snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d", N, NT, nrep, labels[s]);
         all_data[s] = read_pt_data(sdir, nrep);
         all_ex[s] = read_exchange_data(sdir);
+        all_ex_sweep[s] = read_exchange_sweep_data(sdir);
         if (all_data[s].empty())
             fprintf(stderr, "Warning: no data in %s\n", sdir);
     }
@@ -564,11 +665,221 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
+    // History block averaging
+    // ================================================================
+    // For each temperature, tile the time series into doubling blocks:
+    //   block 0: measurements [0, 1)            size 1
+    //   block 1: measurements [1, 3)            size 2
+    //   block 2: measurements [3, 7)            size 4
+    //   ...
+    //   block K: measurements [M/2, M)          size M/2  (last block = second half)
+    //
+    // For each block compute mean energy, error, mean acceptance MC, error,
+    // mean acceptance PT (exchange rate), error — jackknife over samples.
+    //
+    // Output:
+    //   history_nr{r}.dat   — per-replica
+    //   history_mean.dat    — replica-averaged
+    // Columns: sweep_block  energy  err  accept_mc  err  accept_pt  err  temperature
+    // NT blocks separated by blank lines.
+    {
+        // Determine number of doubling blocks from reference sample
+        int M_ref = (int)all_data[ref][0].energy.size();
+        int nblocks = 0;
+        { int sz = 1; int pos = 0; while (pos < M_ref) { pos += sz; sz *= 2; nblocks++; } }
+
+        // Per-replica history files
+        for (int r = 0; r < nrep; r++) {
+            char outfile[512];
+            snprintf(outfile, sizeof(outfile), "%s/history_nr%d.dat", outdir, r);
+            FILE* fout = fopen(outfile, "w");
+            if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); continue; }
+
+            fprintf(fout, "# History block averaging (doubling blocks)\n");
+            fprintf(fout, "# N=%d NT=%d nrep=%d replica=%d nsamples=%d\n", N, NT, nrep, r, nsamples);
+            fprintf(fout, "# Columns: sweep_block  energy  err  accept_mc  err  accept_pt  err  temperature\n");
+            fprintf(fout, "# %d temperature blocks separated by blank lines\n", ntemps);
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                if (ti > 0) fprintf(fout, "\n");
+
+                int M = (int)all_data[ref][ti].energy.size();
+                int bsize = 1, pos = 0;
+                for (int b = 0; b < nblocks && pos < M; b++) {
+                    int bend = pos + bsize;
+                    if (bend > M) bend = M;
+                    int sweep_end = all_data[ref][ti].sweeps[bend - 1];
+
+                    // Per-sample observables for this block
+                    std::vector<double> sE(nsamples, 0), sA(nsamples, 0), sPT(nsamples, 0);
+                    for (int s = 0; s < nsamples; s++) {
+                        if (ti >= (int)all_data[s].size()) continue;
+                        auto& tb = all_data[s][ti];
+                        int Ms = (int)tb.energy.size();
+                        int p = pos, be = bend;
+                        if (be > Ms) be = Ms;
+                        if (p >= Ms) continue;
+                        int nn = be - p;
+                        double se = 0, sa = 0;
+                        for (int i = p; i < be; i++) {
+                            se += tb.energy[i][r];
+                            sa += tb.acc[i][r];
+                        }
+                        sE[s] = se / nn;
+                        sA[s] = sa / nn;
+
+                        // Exchange rate for this block (use temperature pair tidx = ti)
+                        if (ti < (int)all_ex_sweep[s].size()) {
+                            auto& esb = all_ex_sweep[s][ti];
+                            int Mex = (int)esb.sweeps.size();
+                            if (p < Mex) {
+                                int be_ex = (be < Mex) ? be : Mex;
+                                long long acc_sum = 0, prop_sum = 0;
+                                for (int i = p; i < be_ex; i++) {
+                                    acc_sum += esb.n_acc[i];
+                                    prop_sum += esb.n_prop[i];
+                                }
+                                sPT[s] = (prop_sum > 0) ? (double)acc_sum / prop_sum : 0.0;
+                            }
+                        }
+                    }
+
+                    // Jackknife
+                    double fE = 0, fA = 0, fPT = 0;
+                    for (int s = 0; s < nsamples; s++) { fE += sE[s]; fA += sA[s]; fPT += sPT[s]; }
+                    fE /= nsamples; fA /= nsamples; fPT /= nsamples;
+
+                    double jE = 0, jA = 0, jPT = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lE = 0, lA = 0, lPT = 0;
+                        for (int s = 0; s < nsamples; s++) {
+                            if (s == j) continue;
+                            lE += sE[s]; lA += sA[s]; lPT += sPT[s];
+                        }
+                        lE /= (nsamples - 1); lA /= (nsamples - 1); lPT /= (nsamples - 1);
+                        jE += (lE - fE) * (lE - fE);
+                        jA += (lA - fA) * (lA - fA);
+                        jPT += (lPT - fPT) * (lPT - fPT);
+                    }
+                    jE = sqrt((nsamples - 1.0) / nsamples * jE);
+                    jA = sqrt((nsamples - 1.0) / nsamples * jA);
+                    jPT = sqrt((nsamples - 1.0) / nsamples * jPT);
+
+                    fprintf(fout, "%d\t%.8f\t%.8f\t%.5f\t%.5f\t%.6f\t%.6f\t%.8f\n",
+                            sweep_end, fE, jE, fA, jA, fPT, jPT, T);
+
+                    pos = bend;
+                    bsize *= 2;
+                }
+            }
+            fclose(fout);
+            printf("  Written %s\n", outfile);
+        }
+
+        // Replica-averaged history file
+        {
+            char outfile[512];
+            snprintf(outfile, sizeof(outfile), "%s/history_mean.dat", outdir);
+            FILE* fout = fopen(outfile, "w");
+            if (!fout) { fprintf(stderr, "Cannot open %s\n", outfile); }
+            else {
+                fprintf(fout, "# History block averaging (doubling blocks) — replica averaged\n");
+                fprintf(fout, "# N=%d NT=%d nrep=%d nsamples=%d\n", N, NT, nrep, nsamples);
+                fprintf(fout, "# Columns: sweep_block  energy  err  accept_mc  err  accept_pt  err  temperature\n");
+                fprintf(fout, "# %d temperature blocks separated by blank lines\n", ntemps);
+
+                for (int ti = 0; ti < ntemps; ti++) {
+                    double T = all_data[ref][ti].T;
+                    if (ti > 0) fprintf(fout, "\n");
+
+                    int M = (int)all_data[ref][ti].energy.size();
+                    int bsize = 1, pos = 0;
+                    int b = 0;
+                    while (pos < M) {
+                        int bend = pos + bsize;
+                        if (bend > M) bend = M;
+                        int sweep_end = all_data[ref][ti].sweeps[bend - 1];
+
+                        // Per-sample: average over replicas
+                        std::vector<double> smE(nsamples, 0), smA(nsamples, 0), smPT(nsamples, 0);
+                        for (int s = 0; s < nsamples; s++) {
+                            if (ti >= (int)all_data[s].size()) continue;
+                            auto& tb = all_data[s][ti];
+                            int Ms = (int)tb.energy.size();
+                            int p = pos, be = bend;
+                            if (be > Ms) be = Ms;
+                            if (p >= Ms) continue;
+                            int nn = be - p;
+                            for (int r = 0; r < nrep; r++) {
+                                double se = 0, sa = 0;
+                                for (int i = p; i < be; i++) {
+                                    se += tb.energy[i][r];
+                                    sa += tb.acc[i][r];
+                                }
+                                smE[s] += se / nn;
+                                smA[s] += sa / nn;
+                            }
+                            smE[s] /= nrep;
+                            smA[s] /= nrep;
+
+                            // Exchange rate averaged over replicas (use tidx = ti)
+                            if (ti < (int)all_ex_sweep[s].size()) {
+                                auto& esb = all_ex_sweep[s][ti];
+                                int Mex = (int)esb.sweeps.size();
+                                if (p < Mex) {
+                                    int be_ex = (be < Mex) ? be : Mex;
+                                    long long acc_sum = 0, prop_sum = 0;
+                                    for (int i = p; i < be_ex; i++) {
+                                        acc_sum += esb.n_acc[i];
+                                        prop_sum += esb.n_prop[i];
+                                    }
+                                    smPT[s] = (prop_sum > 0) ? (double)acc_sum / prop_sum : 0.0;
+                                }
+                            }
+                        }
+
+                        // Jackknife
+                        double fE = 0, fA = 0, fPT = 0;
+                        for (int s = 0; s < nsamples; s++) { fE += smE[s]; fA += smA[s]; fPT += smPT[s]; }
+                        fE /= nsamples; fA /= nsamples; fPT /= nsamples;
+
+                        double jE = 0, jA = 0, jPT = 0;
+                        for (int j = 0; j < nsamples; j++) {
+                            double lE = 0, lA = 0, lPT = 0;
+                            for (int s = 0; s < nsamples; s++) {
+                                if (s == j) continue;
+                                lE += smE[s]; lA += smA[s]; lPT += smPT[s];
+                            }
+                            lE /= (nsamples - 1); lA /= (nsamples - 1); lPT /= (nsamples - 1);
+                            jE += (lE - fE) * (lE - fE);
+                            jA += (lA - fA) * (lA - fA);
+                            jPT += (lPT - fPT) * (lPT - fPT);
+                        }
+                        jE = sqrt((nsamples - 1.0) / nsamples * jE);
+                        jA = sqrt((nsamples - 1.0) / nsamples * jA);
+                        jPT = sqrt((nsamples - 1.0) / nsamples * jPT);
+
+                        fprintf(fout, "%d\t%.8f\t%.8f\t%.5f\t%.5f\t%.6f\t%.6f\t%.8f\n",
+                                sweep_end, fE, jE, fA, jA, fPT, jPT, T);
+
+                        pos = bend;
+                        bsize *= 2;
+                        b++;
+                    }
+                }
+                fclose(fout);
+                printf("  Written %s\n", outfile);
+            }
+        }
+    }
+
+    // ================================================================
     // Intensity Spectrum
     // ================================================================
     {
         // Read frequencies from reference sample
-        char refdir[256];
+        char refdir[512];
         snprintf(refdir, sizeof(refdir), "data/PT_N%d_NT%d_NR%d_S%d",
                  N, NT, nrep, labels[ref]);
         auto omega = read_frequencies(refdir, N);
@@ -578,7 +889,7 @@ int main(int argc, char** argv) {
         std::vector<std::vector<std::vector<double>>> spec_s(nsamples);
 
         for (int s = 0; s < nsamples; s++) {
-            char sdir[256];
+            char sdir[512];
             snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
                      N, NT, nrep, labels[s]);
             char confdir[512];
@@ -661,6 +972,333 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
+    // Parisi Overlap Distribution (only if nrep > 1)
+    // ================================================================
+    if (nrep > 1) {
+        printf("\n── Parisi overlap (nrep=%d, nbins=%d, threads=%d) ──\n",
+               nrep, nbins, nthreads);
+
+        // hist_s[s][ti][bin] = histogram count for sample s, temperature ti
+        // We accumulate counts, then normalize at the end.
+        double qmin = -1.0, qmax = 1.0;
+        double dq = (qmax - qmin) / nbins;
+
+        // Per-sample, per-temperature histograms
+        std::vector<std::vector<std::vector<double>>> hist_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[512];
+            snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
+                     N, NT, nrep, labels[s]);
+            char confdir_base[512];
+            snprintf(confdir_base, sizeof(confdir_base), "%s/configs", sdir);
+
+            hist_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
+
+            // Parallel over temperatures
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                // Each thread has its own local histogram per temperature
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+
+                    int tidx = all_data[ref][ti].tidx;
+                    std::string confdir(confdir_base);
+
+                    // Find iteration numbers common to all replicas
+                    std::vector<std::vector<int>> rep_iters(nrep);
+                    for (int r = 0; r < nrep; r++)
+                        rep_iters[r] = find_config_iters(confdir.c_str(), tidx, r);
+
+                    std::vector<int> common_iters = rep_iters[0];
+                    for (int r = 1; r < nrep; r++) {
+                        std::vector<int> tmp;
+                        std::set_intersection(common_iters.begin(), common_iters.end(),
+                                              rep_iters[r].begin(), rep_iters[r].end(),
+                                              std::back_inserter(tmp));
+                        common_iters = tmp;
+                    }
+
+                    if (common_iters.empty()) continue;
+
+                    std::vector<double> local_hist(nbins, 0.0);
+                    long long n_overlaps = 0;
+
+                    for (int ci = 0; ci < (int)common_iters.size(); ci++) {
+                        int iter = common_iters[ci];
+
+                        std::vector<std::vector<double>> sre(nrep), sim(nrep);
+                        bool all_ok = true;
+                        for (int r = 0; r < nrep; r++) {
+                            char fn[768];
+                            snprintf(fn, sizeof(fn), "%s/conf_T%d_r%d_iter%d.bin",
+                                     confdir.c_str(), tidx, r, iter);
+                            if (!read_config_spins(fn, N, sre[r], sim[r])) {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                        if (!all_ok) continue;
+
+                        for (int a = 0; a < nrep; a++) {
+                            for (int b = a + 1; b < nrep; b++) {
+                                double re_sum = 0.0;
+                                for (int k = 0; k < N; k++)
+                                    re_sum += sre[a][k] * sre[b][k] + sim[a][k] * sim[b][k];
+                                double q = re_sum / (2.0 * N);
+
+                                int bin = (int)((q - qmin) / dq);
+                                if (bin < 0) bin = 0;
+                                if (bin >= nbins) bin = nbins - 1;
+                                local_hist[bin] += 1.0;
+                                n_overlaps++;
+                            }
+                        }
+                    }
+
+                    // Normalize and store
+                    if (n_overlaps > 0) {
+                        for (int b = 0; b < nbins; b++)
+                            local_hist[b] /= (n_overlaps * dq);
+                    }
+                    hist_s[s][ti] = std::move(local_hist);
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++)
+                threads.emplace_back(worker, t);
+            for (auto& th : threads)
+                th.join();
+
+            printf("  Sample S%d: overlap computed\n", labels[s]);
+        }
+
+        // Write parisi_overlap.dat: NT blocks, jackknife over samples
+        char olapfile[512];
+        snprintf(olapfile, sizeof(olapfile), "%s/parisi_overlap.dat", outdir);
+        FILE* fol = fopen(olapfile, "w");
+        if (fol) {
+            fprintf(fol, "# Parisi overlap distribution P(q)\n");
+            fprintf(fol, "# N=%d NT=%d nrep=%d nbins=%d nsamples=%d\n",
+                    N, NT, nrep, nbins, nsamples);
+            fprintf(fol, "# q = Re[ (1/(2N)) sum_i a_i^alpha * conj(a_i^beta) ]\n");
+            fprintf(fol, "# Columns: q_center  P(q)  Error_jk  Temperature\n");
+            fprintf(fol, "# NT blocks separated by blank lines\n");
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                fprintf(fol, "\n");
+
+                for (int b = 0; b < nbins; b++) {
+                    double qc = qmin + (b + 0.5) * dq;
+
+                    // Full sample mean
+                    double fP = 0;
+                    for (int s = 0; s < nsamples; s++)
+                        fP += hist_s[s][ti][b];
+                    fP /= nsamples;
+
+                    // Jackknife error
+                    double jP = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lP = 0;
+                        for (int s = 0; s < nsamples; s++) {
+                            if (s == j) continue;
+                            lP += hist_s[s][ti][b];
+                        }
+                        lP /= (nsamples - 1);
+                        jP += (lP - fP) * (lP - fP);
+                    }
+                    jP = sqrt((nsamples - 1.0) / nsamples * jP);
+
+                    fprintf(fol, "%.12f\t%.8e\t%.8e\t%.8f\n", qc, fP, jP, T);
+                }
+            }
+            fclose(fol);
+            printf("  Written %s\n", olapfile);
+        }
+    }
+
+    // ================================================================
+    // Intensity Fluctuation Overlap (IFO) Distribution (only if nrep > 1)
+    // ================================================================
+    if (nrep > 1) {
+        printf("\n── IFO overlap (nrep=%d, nbins=%d, threads=%d) ──\n",
+               nrep, nbins, nthreads);
+
+        double cmin = -1.0, cmax = 1.0;
+        double dc = (cmax - cmin) / nbins;
+
+        std::vector<std::vector<std::vector<double>>> ifo_hist_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[512];
+            snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
+                     N, NT, nrep, labels[s]);
+            char confdir_base[512];
+            snprintf(confdir_base, sizeof(confdir_base), "%s/configs", sdir);
+
+            ifo_hist_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+
+                    int tidx = all_data[ref][ti].tidx;
+                    std::string confdir(confdir_base);
+
+                    // Find iteration numbers common to all replicas
+                    std::vector<std::vector<int>> rep_iters(nrep);
+                    for (int r = 0; r < nrep; r++)
+                        rep_iters[r] = find_config_iters(confdir.c_str(), tidx, r);
+
+                    std::vector<int> common_iters = rep_iters[0];
+                    for (int r = 1; r < nrep; r++) {
+                        std::vector<int> tmp;
+                        std::set_intersection(common_iters.begin(), common_iters.end(),
+                                              rep_iters[r].begin(), rep_iters[r].end(),
+                                              std::back_inserter(tmp));
+                        common_iters = tmp;
+                    }
+
+                    int nsweeps_eq = (int)common_iters.size();
+                    if (nsweeps_eq < 1) continue;
+
+                    // Read all configs: Ik[r][sweep][k]
+                    std::vector<std::vector<std::vector<double>>> Ik(nrep);
+                    bool all_ok = true;
+                    for (int r = 0; r < nrep && all_ok; r++) {
+                        Ik[r].resize(nsweeps_eq);
+                        for (int ci = 0; ci < nsweeps_eq; ci++) {
+                            int iter = common_iters[ci];
+                            char fn[768];
+                            snprintf(fn, sizeof(fn), "%s/conf_T%d_r%d_iter%d.bin",
+                                     confdir.c_str(), tidx, r, iter);
+                            std::vector<double> re, im;
+                            if (!read_config_spins(fn, N, re, im)) {
+                                all_ok = false;
+                                break;
+                            }
+                            Ik[r][ci].resize(N);
+                            for (int k = 0; k < N; k++)
+                                Ik[r][ci][k] = re[k] * re[k] + im[k] * im[k];
+                        }
+                    }
+                    if (!all_ok) continue;
+
+                    // Compute <I_k>(r) = mean over sweeps for each replica
+                    // meanI[r][k]
+                    std::vector<std::vector<double>> meanI(nrep, std::vector<double>(N, 0.0));
+                    for (int r = 0; r < nrep; r++) {
+                        for (int ci = 0; ci < nsweeps_eq; ci++)
+                            for (int k = 0; k < N; k++)
+                                meanI[r][k] += Ik[r][ci][k];
+                        for (int k = 0; k < N; k++)
+                            meanI[r][k] /= nsweeps_eq;
+                    }
+
+                    // Compute IFO for all pairs and sweeps
+                    std::vector<double> local_hist(nbins, 0.0);
+                    long long n_overlaps = 0;
+
+                    for (int ci = 0; ci < nsweeps_eq; ci++) {
+                        // delta[r][k] = I_k(r,s) - <I_k>(r)
+                        std::vector<std::vector<double>> delta(nrep, std::vector<double>(N));
+                        std::vector<double> norm2(nrep, 0.0); // sum_k delta_k^2
+                        for (int r = 0; r < nrep; r++) {
+                            for (int k = 0; k < N; k++) {
+                                delta[r][k] = Ik[r][ci][k] - meanI[r][k];
+                                norm2[r] += delta[r][k] * delta[r][k];
+                            }
+                        }
+
+                        for (int a = 0; a < nrep; a++) {
+                            for (int b = a + 1; b < nrep; b++) {
+                                double den = sqrt(norm2[a] * norm2[b]);
+                                if (den <= 0) continue;
+                                double num = 0.0;
+                                for (int k = 0; k < N; k++)
+                                    num += delta[a][k] * delta[b][k];
+                                double C = num / den;
+
+                                int bin = (int)((C - cmin) / dc);
+                                if (bin < 0) bin = 0;
+                                if (bin >= nbins) bin = nbins - 1;
+                                local_hist[bin] += 1.0;
+                                n_overlaps++;
+                            }
+                        }
+                    }
+
+                    if (n_overlaps > 0) {
+                        for (int b = 0; b < nbins; b++)
+                            local_hist[b] /= (n_overlaps * dc);
+                    }
+                    ifo_hist_s[s][ti] = std::move(local_hist);
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++)
+                threads.emplace_back(worker, t);
+            for (auto& th : threads)
+                th.join();
+
+            printf("  Sample S%d: IFO computed\n", labels[s]);
+        }
+
+        // Write ifo_overlap.dat: NT blocks, jackknife over samples
+        char ifofile[512];
+        snprintf(ifofile, sizeof(ifofile), "%s/ifo_overlap.dat", outdir);
+        FILE* fif = fopen(ifofile, "w");
+        if (fif) {
+            fprintf(fif, "# Intensity Fluctuation Overlap (IFO) distribution P(C)\n");
+            fprintf(fif, "# N=%d NT=%d nrep=%d nbins=%d nsamples=%d\n",
+                    N, NT, nrep, nbins, nsamples);
+            fprintf(fif, "# C^{ab} = sum_k delta_k^a delta_k^b / sqrt(sum_k (delta_k^a)^2 * sum_k (delta_k^b)^2)\n");
+            fprintf(fif, "# delta_k^r = I_k^r - <I_k^r>_sweeps,  I_k = |a_k|^2\n");
+            fprintf(fif, "# Columns: C_center  P(C)  Error_jk  Temperature\n");
+            fprintf(fif, "# NT blocks separated by blank lines\n");
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                fprintf(fif, "\n");
+
+                for (int b = 0; b < nbins; b++) {
+                    double cc = cmin + (b + 0.5) * dc;
+
+                    double fP = 0;
+                    for (int s = 0; s < nsamples; s++)
+                        fP += ifo_hist_s[s][ti][b];
+                    fP /= nsamples;
+
+                    double jP = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lP = 0;
+                        for (int s = 0; s < nsamples; s++) {
+                            if (s == j) continue;
+                            lP += ifo_hist_s[s][ti][b];
+                        }
+                        lP /= (nsamples - 1);
+                        jP += (lP - fP) * (lP - fP);
+                    }
+                    jP = sqrt((nsamples - 1.0) / nsamples * jP);
+
+                    fprintf(fif, "%.12f\t%.8e\t%.8e\t%.8f\n", cc, fP, jP, T);
+                }
+            }
+            fclose(fif);
+            printf("  Written %s\n", ifofile);
+        }
+    }
+
+    // ================================================================
     // Plotting (if --plot)
     // ================================================================
     if (do_plot) {
@@ -699,14 +1337,11 @@ int main(int argc, char** argv) {
 
                 if (!blocks.empty()) {
                     Plot2D plot;
-                    plot.xlabel("Frequency {/Symbol w}");
-                    plot.ylabel("Emission intensity  I_k");
-                    plot.fontName("Helvetica");
-                    plot.fontSize(16);
+                    plot.xlabel("{/Times-Italic {/Symbol w}}");
+                    plot.ylabel("{/Times-Italic I}_{/Times-Italic k}");
+                    plot.fontName("Times");
+                    plot.fontSize(18);
                     plot.legend().hide();
-                    plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                    plot.gnuplot("set border lw 1.5");
-                    plot.gnuplot("set tics font 'Helvetica,13'");
                     int nb = (int)blocks.size();
                     double Tmin = blocks.back()[0].T;
                     double Tmax = blocks.front()[0].T;
@@ -715,7 +1350,7 @@ int main(int argc, char** argv) {
                     char cbr[128];
                     snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                     plot.gnuplot(cbr);
-                    plot.gnuplot("set cblabel 'T' font 'Helvetica,14'");
+                    plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
                     plot.gnuplot("set colorbox");
                     for (int bi = 0; bi < nb; bi++) {
                         auto& bl = blocks[bi];
@@ -772,14 +1407,12 @@ int main(int argc, char** argv) {
                     // Energy plot
                     {
                         Plot2D plot;
-                        plot.xlabel("Temperature T");
-                        plot.ylabel("Energy  E/N");
-                        plot.fontName("Helvetica");
-                        plot.fontSize(16);
+                        plot.xlabel("{/Times-Italic T}");
+                        plot.ylabel("{/Times-Italic E} / {/Times-Italic N}");
+                        plot.fontName("Times");
+                        plot.fontSize(18);
                         plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                        plot.gnuplot("set border lw 1.5");
-                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vElo, vEhi)
                             .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
                             .lineColor("#4393c3").lineWidth(0).labelNone();
@@ -795,14 +1428,12 @@ int main(int argc, char** argv) {
                     // MC Acceptance plot
                     {
                         Plot2D plot;
-                        plot.xlabel("Temperature T");
-                        plot.ylabel("MC acceptance rate");
-                        plot.fontName("Helvetica");
-                        plot.fontSize(16);
+                        plot.xlabel("{/Times-Italic T}");
+                        plot.ylabel("MC acceptance");
+                        plot.fontName("Times");
+                        plot.fontSize(18);
                         plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                        plot.gnuplot("set border lw 1.5");
-                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vAlo, vAhi)
                             .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
                             .lineColor("#66c2a5").lineWidth(0).labelNone();
@@ -818,14 +1449,12 @@ int main(int argc, char** argv) {
                     // Specific heat plot
                     {
                         Plot2D plot;
-                        plot.xlabel("Temperature T");
-                        plot.ylabel("Specific heat  C_v");
-                        plot.fontName("Helvetica");
-                        plot.fontSize(16);
+                        plot.xlabel("{/Times-Italic T}");
+                        plot.ylabel("{/Times-Italic C}_{/Times-Italic v}");
+                        plot.fontName("Times");
+                        plot.fontSize(18);
                         plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                        plot.gnuplot("set border lw 1.5");
-                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vCvlo, vCvhi)
                             .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
                             .lineColor("#f4a582").lineWidth(0).labelNone();
@@ -870,14 +1499,12 @@ int main(int argc, char** argv) {
                         vRhi[i] = data[i].rate + data[i].err;
                     }
                     Plot2D plot;
-                    plot.xlabel("Temperature T");
+                    plot.xlabel("{/Times-Italic T}");
                     plot.ylabel("PT exchange rate");
-                    plot.fontName("Helvetica");
-                    plot.fontSize(16);
+                    plot.fontName("Times");
+                    plot.fontSize(18);
                     plot.legend().atTopRight();
-                    plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
-                    plot.gnuplot("set border lw 1.5");
-                    plot.gnuplot("set tics font 'Helvetica,13'");
+                    plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                     plot.drawCurvesFilled(vT, vRlo, vRhi)
                         .fillColor("#8da0cb").fillIntensity(0.35).fillTransparent()
                         .lineColor("#8da0cb").lineWidth(0).labelNone();
@@ -890,6 +1517,234 @@ int main(int argc, char** argv) {
                     canvas.save(pf);
                     printf("  Written %s\n", pf);
                 }
+            }
+        }
+
+        // --- 4) History plots (from history_mean.dat) ---
+        {
+            char histfile[512];
+            snprintf(histfile, sizeof(histfile), "%s/history_mean.dat", outdir);
+            FILE* f = fopen(histfile, "r");
+            if (f) {
+                struct HistLine { int sweep; double E, Eerr, A, Aerr, PT, PTerr, T; };
+                std::vector<std::vector<HistLine>> blocks;
+                std::vector<HistLine> cur;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#') continue;
+                    if (line[0] == '\n' || line[0] == '\r') {
+                        if (!cur.empty()) { blocks.push_back(cur); cur.clear(); }
+                        continue;
+                    }
+                    HistLine hl;
+                    if (sscanf(line, "%d %lf %lf %lf %lf %lf %lf %lf",
+                               &hl.sweep, &hl.E, &hl.Eerr, &hl.A, &hl.Aerr,
+                               &hl.PT, &hl.PTerr, &hl.T) == 8)
+                        cur.push_back(hl);
+                }
+                if (!cur.empty()) blocks.push_back(cur);
+                fclose(f);
+
+                if (!blocks.empty()) {
+                    int nb = (int)blocks.size();
+                    double Tmin = 1e30, Tmax = -1e30;
+                    for (auto& bl : blocks) {
+                        if (bl[0].T < Tmin) Tmin = bl[0].T;
+                        if (bl[0].T > Tmax) Tmax = bl[0].T;
+                    }
+
+                    // Helper lambda: create a history plot
+                    auto make_history_plot = [&](const char* ylabel_str,
+                                                 int val_col, // 0=E, 1=A, 2=PT
+                                                 const char* outname) {
+                        Plot2D plot;
+                        plot.xlabel("sweep");
+                        plot.ylabel(ylabel_str);
+                        plot.fontName("Times");
+                        plot.fontSize(18);
+                        plot.legend().hide();
+                        plot.gnuplot("set logscale x 2");
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                        plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                        char cbr[128];
+                        snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
+                        plot.gnuplot(cbr);
+                        plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
+                        plot.gnuplot("set colorbox");
+
+                        for (int bi = 0; bi < nb; bi++) {
+                            auto& bl = blocks[bi];
+                            int n = (int)bl.size();
+                            std::vector<double> vx(n), vy(n);
+                            for (int i = 0; i < n; i++) {
+                                vx[i] = bl[i].sweep;
+                                if (val_col == 0) vy[i] = bl[i].E;
+                                else if (val_col == 1) vy[i] = bl[i].A;
+                                else vy[i] = bl[i].PT;
+                            }
+                            double frac = (Tmax > Tmin) ? (bl[0].T - Tmin) / (Tmax - Tmin) : 0.5;
+                            plot.drawCurve(vx, vy)
+                                .lineColor(temp_color(frac))
+                                .lineWidth(2)
+                                .label("");
+                        }
+                        Figure fig = {{plot}};
+                        Canvas canvas = {{fig}};
+                        canvas.size(1800, 1200);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/%s", plotdir, outname);
+                        canvas.save(pf);
+                        printf("  Written %s\n", pf);
+                    };
+
+                    make_history_plot("{/Times-Italic E} / {/Times-Italic N}", 0, "energy_history.png");
+                    make_history_plot("MC acceptance", 1, "acceptance_history.png");
+                    make_history_plot("PT exchange rate", 2, "exchange_history.png");
+                }
+            }
+        }
+
+        // --- Parisi overlap P(q) plot ---
+        if (nrep > 1) {
+            char olapfile[512];
+            snprintf(olapfile, sizeof(olapfile), "%s/parisi_overlap.dat", outdir);
+
+            // Read the overlap file we wrote earlier
+            struct OlapRow { double q, pq, err, T; };
+            std::vector<std::vector<OlapRow>> oblocks;  // blocks by temperature
+            {
+                FILE* f = fopen(olapfile, "r");
+                if (f) {
+                    char line[512];
+                    std::vector<OlapRow> cur;
+                    while (fgets(line, sizeof(line), f)) {
+                        if (line[0] == '#') continue;
+                        if (line[0] == '\n') {
+                            if (!cur.empty()) oblocks.push_back(cur);
+                            cur.clear();
+                            continue;
+                        }
+                        OlapRow r;
+                        if (sscanf(line, "%lf %lf %lf %lf", &r.q, &r.pq, &r.err, &r.T) == 4)
+                            cur.push_back(r);
+                    }
+                    if (!cur.empty()) oblocks.push_back(cur);
+                    fclose(f);
+                }
+            }
+
+            if (!oblocks.empty()) {
+                Plot2D plot;
+                plot.xlabel("{/Times-Italic q}");
+                plot.ylabel("{/Times-Italic P}({/Times-Italic q})");
+                plot.fontName("Times");
+                plot.fontSize(18);
+                plot.legend().hide();
+                plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                plot.gnuplot("set logscale y 10");
+                plot.gnuplot("set format y '10^{%L}'");
+
+                int nb = (int)oblocks.size();
+                double Tmin_ov = oblocks.back()[0].T;
+                double Tmax_ov = oblocks.front()[0].T;
+                plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                char cbr[128];
+                snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin_ov, Tmax_ov);
+                plot.gnuplot(cbr);
+                plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
+                plot.gnuplot("set colorbox");
+
+                for (int bi = 0; bi < nb; bi++) {
+                    auto& bl = oblocks[bi];
+                    std::vector<double> vq, vpq;
+                    for (int i = 0; i < (int)bl.size(); i++) {
+                        if (bl[i].pq > 0) { vq.push_back(bl[i].q); vpq.push_back(bl[i].pq); }
+                    }
+                    if (vq.empty()) continue;
+                    double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                    plot.drawCurve(vq, vpq)
+                        .lineColor(temp_color(frac))
+                        .lineWidth(2)
+                        .label("");
+                }
+
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(1800, 1200);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/parisi_overlap.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- IFO overlap P(C) plot ---
+        if (nrep > 1) {
+            char ifofile[512];
+            snprintf(ifofile, sizeof(ifofile), "%s/ifo_overlap.dat", outdir);
+
+            struct OlapRow { double q, pq, err, T; };
+            std::vector<std::vector<OlapRow>> iblocks;
+            {
+                FILE* f = fopen(ifofile, "r");
+                if (f) {
+                    char line[512];
+                    std::vector<OlapRow> cur;
+                    while (fgets(line, sizeof(line), f)) {
+                        if (line[0] == '#') continue;
+                        if (line[0] == '\n') {
+                            if (!cur.empty()) iblocks.push_back(cur);
+                            cur.clear();
+                            continue;
+                        }
+                        OlapRow r;
+                        if (sscanf(line, "%lf %lf %lf %lf", &r.q, &r.pq, &r.err, &r.T) == 4)
+                            cur.push_back(r);
+                    }
+                    if (!cur.empty()) iblocks.push_back(cur);
+                    fclose(f);
+                }
+            }
+
+            if (!iblocks.empty()) {
+                Plot2D plot;
+                plot.xlabel("{/Times-Italic C}");
+                plot.ylabel("{/Times-Italic P}({/Times-Italic C})");
+                plot.fontName("Times");
+                plot.fontSize(18);
+                plot.legend().hide();
+                plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                plot.gnuplot("set logscale y 10");
+                plot.gnuplot("set format y '10^{%L}'");
+
+                int nb = (int)iblocks.size();
+                double Tmin_if = iblocks.back()[0].T;
+                double Tmax_if = iblocks.front()[0].T;
+                plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                char cbr[128];
+                snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin_if, Tmax_if);
+                plot.gnuplot(cbr);
+                plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
+                plot.gnuplot("set colorbox");
+
+                for (int bi = 0; bi < nb; bi++) {
+                    auto& bl = iblocks[bi];
+                    std::vector<double> vc, vpc;
+                    for (int i = 0; i < (int)bl.size(); i++) {
+                        if (bl[i].pq > 0) { vc.push_back(bl[i].q); vpc.push_back(bl[i].pq); }
+                    }
+                    if (vc.empty()) continue;
+                    double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                    plot.drawCurve(vc, vpc)
+                        .lineColor(temp_color(frac))
+                        .lineWidth(2)
+                        .label("");
+                }
+
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(1800, 1200);
+                char ipf[512]; snprintf(ipf, sizeof(ipf), "%s/ifo_overlap.png", plotdir);
+                canvas.save(ipf);
+                printf("  Written %s\n", ipf);
             }
         }
     }

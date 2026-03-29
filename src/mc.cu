@@ -450,14 +450,18 @@ MCState mc_init(const SimConfig& cfg) {
         state.d_spins, state.d_g2, state.d_g4, N, nrep, state.d_energies);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Print initial energies if verbose
+    // Print initial energies if verbose (highest-T and lowest-energy only)
     if (cfg.verbose) {
         double* h_energies = new double[nrep];
         CUDA_CHECK(cudaMemcpy(h_energies, state.d_energies, nrep * sizeof(double),
                               cudaMemcpyDeviceToHost));
-        for (int r = 0; r < nrep; r++) {
-            printf("Replica %d: initial E/N = %.6f\n", r, h_energies[r] / N);
+        int i_hot = 0;   // replica at highest T (index 0)
+        int i_low = 0;   // replica with lowest energy
+        for (int r = 1; r < nrep; r++) {
+            if (h_energies[r] < h_energies[i_low]) i_low = r;
         }
+        printf("  initial E/N  highest-T (rep %d): %.6f\n", i_hot, h_energies[i_hot] / N);
+        printf("  initial E/N  lowest-E  (rep %d): %.6f\n", i_low, h_energies[i_low] / N);
         delete[] h_energies;
     }
 
