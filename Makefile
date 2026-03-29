@@ -7,7 +7,7 @@ CXX     = g++
 LIB_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
 
 NVFLAGS = -std=c++11 -arch=sm_70 -O3 -Iinclude -DNDEBUG
-CXFLAGS = -std=c++11 -O3 -Wall -DNDEBUG
+CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 
 .PHONY: all clean mc sa pt analysis_mc analysis_sa analysis_pt

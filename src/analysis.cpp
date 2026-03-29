@@ -8,6 +8,25 @@
 #include <dirent.h>
 #include <regex.h>
 #include <sys/stat.h>
+#include <sciplot/sciplot.hpp>
+
+static std::string temp_color(double frac) {
+    double r, g, b;
+    if (frac < 0.33) {
+        double t = frac / 0.33;
+        r = 0.1 * t;         g = 0.2 + 0.5 * t;  b = 0.8 - 0.3 * t;
+    } else if (frac < 0.66) {
+        double t = (frac - 0.33) / 0.33;
+        r = 0.1 + 0.7 * t;  g = 0.7 - 0.1 * t;  b = 0.5 - 0.4 * t;
+    } else {
+        double t = (frac - 0.66) / 0.34;
+        r = 0.8 + 0.2 * t;  g = 0.6 - 0.5 * t;  b = 0.1 - 0.05 * t;
+    }
+    char hex[16];
+    snprintf(hex, sizeof(hex), "#%02X%02X%02X",
+             (int)(r*255), (int)(g*255), (int)(b*255));
+    return hex;
+}
 
 // ================================================================
 // Intensity spectrum helpers
@@ -180,7 +199,7 @@ static void mkdir_p(const char* path) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>] [--plot]\n", prog);
     fprintf(stderr, "  Without -label: averages over all samples S0, S1, ...\n");
     fprintf(stderr, "  With -label L:  analyzes single sample SL only\n");
     fprintf(stderr, "  -T: simulation temperature (default 1.0, used for spectrum output)\n");
@@ -279,6 +298,7 @@ int main(int argc, char** argv) {
     int label = -1;
     double T_sim = 1.0;
     std::string datadir_override;
+    bool do_plot = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-N") == 0 && i + 1 < argc)
@@ -291,6 +311,8 @@ int main(int argc, char** argv) {
             datadir_override = argv[++i];
         else if (strcmp(argv[i], "-T") == 0 && i + 1 < argc)
             T_sim = atof(argv[++i]);
+        else if (strcmp(argv[i], "--plot") == 0)
+            do_plot = true;
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);
@@ -547,6 +569,81 @@ int main(int argc, char** argv) {
             }
             fclose(fsp);
             printf("  Written %s\n", specfile);
+        }
+    }
+
+    // ================================================================
+    // Plotting (if --plot)
+    // ================================================================
+    if (do_plot) {
+        using namespace sciplot;
+        printf("\n── Generating plots ────────────────────────────────\n");
+
+        char outdir[256];
+        snprintf(outdir, sizeof(outdir), "analysis/MC_N%d_NR%d", N, nrep);
+
+        char plotdir[512];
+        snprintf(plotdir, sizeof(plotdir), "%s/plots", outdir);
+        mkdir_p(plotdir);
+
+        char specfile[512];
+        snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
+        FILE* f = fopen(specfile, "r");
+        if (f) {
+            struct SpecLine { double omega, I, err, T; };
+            std::vector<std::vector<SpecLine>> blocks;
+            std::vector<SpecLine> cur;
+            char line[512];
+            while (fgets(line, sizeof(line), f)) {
+                if (line[0] == '#') continue;
+                if (line[0] == '\n' || line[0] == '\r') {
+                    if (!cur.empty()) { blocks.push_back(cur); cur.clear(); }
+                    continue;
+                }
+                SpecLine sl;
+                if (sscanf(line, "%lf %lf %lf %lf", &sl.omega, &sl.I, &sl.err, &sl.T) == 4)
+                    cur.push_back(sl);
+            }
+            if (!cur.empty()) blocks.push_back(cur);
+            fclose(f);
+
+            if (!blocks.empty()) {
+                Plot2D plot;
+                plot.xlabel("Frequency {/Symbol w}");
+                plot.ylabel("Emission intensity  I_k");
+                plot.fontName("Helvetica");
+                plot.fontSize(16);
+                plot.legend().hide();
+                plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
+                plot.gnuplot("set border lw 1.5");
+                plot.gnuplot("set tics font 'Helvetica,13'");
+                int nb = (int)blocks.size();
+                double Tmin = blocks.back()[0].T;
+                double Tmax = blocks.front()[0].T;
+                plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                char cbr[128];
+                snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
+                plot.gnuplot(cbr);
+                plot.gnuplot("set cblabel 'T' font 'Helvetica,14'");
+                plot.gnuplot("set colorbox");
+                for (int bi = 0; bi < nb; bi++) {
+                    auto& bl = blocks[bi];
+                    int n = (int)bl.size();
+                    std::vector<double> vx(n), vy(n);
+                    for (int i = 0; i < n; i++) { vx[i] = bl[i].omega; vy[i] = bl[i].I; }
+                    double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                    plot.drawCurve(vx, vy)
+                        .lineColor(temp_color(frac))
+                        .lineWidth(2)
+                        .label("");
+                }
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(1800, 1200);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/intensity_spectrum.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
         }
     }
 

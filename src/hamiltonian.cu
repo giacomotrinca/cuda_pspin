@@ -18,8 +18,7 @@
 // ============================================================================
 
 // Kernel: compute H2 partial sums
-// H2 = -sum_{i<j} [ g2_ij * a_i * conj(a_j) + conj(g2_ij * a_i * conj(a_j)) ]
-//     = -2 * sum_{i<j} Re[ g2_ij * a_i * conj(a_j) ]
+// H2 = -sum_{i<j} Re[ g2_ij * a_i * conj(a_j) ]
 __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
                                   const cuDoubleComplex* g2,
                                   int N, double* partial_sums) {
@@ -43,7 +42,7 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
 
         // g2_ij * a_i * conj(a_j)
         cuDoubleComplex prod = cuCmul(gij, cuCmul(ai, aj_conj));
-        local_sum = -2.0 * cuCreal(prod);  // -( prod + conj(prod) ) = -2*Re(prod)
+        local_sum = -cuCreal(prod);
     }
 
     sdata[tid] = local_sum;
@@ -58,8 +57,7 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
 }
 
 // Kernel: compute H4 partial sums
-// H4 = -sum_{i<j<k<l} [ g4_ijkl * a_i * conj(a_j) * a_k * conj(a_l) + c.c. ]
-//     = -2 * sum Re[ g4_ijkl * a_i * conj(a_j) * a_k * conj(a_l) ]
+// H4 = -sum_{i<j<k<l} Re[ g4_ijkl * a_i * conj(a_j) * a_k * conj(a_l) ]
 __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
                                   const cuDoubleComplex* g4,
                                   int N, double* partial_sums) {
@@ -103,7 +101,7 @@ __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
 
         // g4 * a_i * conj(a_j) * a_k * conj(a_l)
         cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(ai, aj_conj), cuCmul(ak, al_conj)));
-        local_sum = -2.0 * cuCreal(prod);
+        local_sum = -cuCreal(prod);
     }
 
     sdata[tid] = local_sum;
@@ -198,10 +196,10 @@ __global__ void delta_e_h2_kernel(
             int c = (i0 < k) ? k : i0;
             cuDoubleComplex gik = g2[r * N + c];
 
-            // Old contribution: -2 Re[ g * a_i * conj(a_k) ]
+            // Old contribution: -Re[ g * a_i * conj(a_k) ]
             cuDoubleComplex old_prod = cuCmul(gik, cuCmul(a_i_old, cuConj(a_k)));
             cuDoubleComplex new_prod = cuCmul(gik, cuCmul(a_i_new, cuConj(a_k)));
-            local_dE += -2.0 * (cuCreal(new_prod) - cuCreal(old_prod));
+            local_dE += -(cuCreal(new_prod) - cuCreal(old_prod));
 
             // Pair (min(j0,k), max(j0,k))
             r = (j0 < k) ? j0 : k;
@@ -210,7 +208,7 @@ __global__ void delta_e_h2_kernel(
 
             old_prod = cuCmul(gjk, cuCmul(a_j_old, cuConj(a_k)));
             new_prod = cuCmul(gjk, cuCmul(a_j_new, cuConj(a_k)));
-            local_dE += -2.0 * (cuCreal(new_prod) - cuCreal(old_prod));
+            local_dE += -(cuCreal(new_prod) - cuCreal(old_prod));
         }
 
         // The (i0, j0) pair itself: only count once (thread k == 0 handles it)
@@ -221,7 +219,7 @@ __global__ void delta_e_h2_kernel(
 
             cuDoubleComplex old_prod = cuCmul(gij, cuCmul(a_i_old, cuConj(a_j_old)));
             cuDoubleComplex new_prod = cuCmul(gij, cuCmul(a_i_new, cuConj(a_j_new)));
-            local_dE += -2.0 * (cuCreal(new_prod) - cuCreal(old_prod));
+            local_dE += -(cuCreal(new_prod) - cuCreal(old_prod));
         }
     }
 
@@ -295,7 +293,7 @@ __global__ void delta_e_h4_kernel(
 
             cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
 
-            local_dE = -2.0 * (cuCreal(new_prod) - cuCreal(old_prod));
+            local_dE = -(cuCreal(new_prod) - cuCreal(old_prod));
         }
     }
 

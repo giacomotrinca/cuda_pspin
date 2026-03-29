@@ -23,6 +23,25 @@
 #include <algorithm>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <sciplot/sciplot.hpp>
+
+static std::string temp_color(double frac) {
+    double r, g, b;
+    if (frac < 0.33) {
+        double t = frac / 0.33;
+        r = 0.1 * t;         g = 0.2 + 0.5 * t;  b = 0.8 - 0.3 * t;
+    } else if (frac < 0.66) {
+        double t = (frac - 0.33) / 0.33;
+        r = 0.1 + 0.7 * t;  g = 0.7 - 0.1 * t;  b = 0.5 - 0.4 * t;
+    } else {
+        double t = (frac - 0.66) / 0.34;
+        r = 0.8 + 0.2 * t;  g = 0.6 - 0.5 * t;  b = 0.1 - 0.05 * t;
+    }
+    char hex[16];
+    snprintf(hex, sizeof(hex), "#%02X%02X%02X",
+             (int)(r*255), (int)(g*255), (int)(b*255));
+    return hex;
+}
 
 // ================================================================
 // Intensity spectrum helpers
@@ -214,19 +233,22 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [--plot]\n", prog);
     exit(1);
 }
 
 int main(int argc, char** argv) {
     int N = 0;
     int nrep = 1;
+    bool do_plot = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-N") == 0 && i + 1 < argc)
             N = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nrep") == 0 && i + 1 < argc)
             nrep = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--plot") == 0)
+            do_plot = true;
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);
@@ -482,6 +504,169 @@ int main(int argc, char** argv) {
             }
             fclose(fsp);
             printf("  Written %s\n", specfile);
+        }
+    }
+
+    // ================================================================
+    // Plotting (if --plot)
+    // ================================================================
+    if (do_plot) {
+        using namespace sciplot;
+        printf("\n── Generating plots ────────────────────────────────\n");
+
+        char plotdir[512];
+        snprintf(plotdir, sizeof(plotdir), "%s/plots", outdir);
+        mkdir_p(plotdir);
+
+        // --- 1) Intensity Spectrum ---
+        {
+            char specfile[512];
+            snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
+            FILE* f = fopen(specfile, "r");
+            if (f) {
+                struct SpecLine { double omega, I, err, T; };
+                std::vector<std::vector<SpecLine>> blocks;
+                std::vector<SpecLine> cur;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#') continue;
+                    if (line[0] == '\n' || line[0] == '\r') {
+                        if (!cur.empty()) { blocks.push_back(cur); cur.clear(); }
+                        continue;
+                    }
+                    SpecLine sl;
+                    if (sscanf(line, "%lf %lf %lf %lf", &sl.omega, &sl.I, &sl.err, &sl.T) == 4)
+                        cur.push_back(sl);
+                }
+                if (!cur.empty()) blocks.push_back(cur);
+                fclose(f);
+
+                if (!blocks.empty()) {
+                    Plot2D plot;
+                    plot.xlabel("Frequency {/Symbol w}");
+                    plot.ylabel("Emission intensity  I_k");
+                    plot.fontName("Helvetica");
+                    plot.fontSize(16);
+                    plot.legend().hide();
+                    plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
+                    plot.gnuplot("set border lw 1.5");
+                    plot.gnuplot("set tics font 'Helvetica,13'");
+                    int nb = (int)blocks.size();
+                    double Tmin = blocks.back()[0].T;
+                    double Tmax = blocks.front()[0].T;
+                    plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                    char cbr[128];
+                    snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
+                    plot.gnuplot(cbr);
+                    plot.gnuplot("set cblabel 'T' font 'Helvetica,14'");
+                    plot.gnuplot("set colorbox");
+                    for (int bi = 0; bi < nb; bi++) {
+                        auto& bl = blocks[bi];
+                        int n = (int)bl.size();
+                        std::vector<double> vx(n), vy(n);
+                        for (int i = 0; i < n; i++) { vx[i] = bl[i].omega; vy[i] = bl[i].I; }
+                        double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                        plot.drawCurve(vx, vy)
+                            .lineColor(temp_color(frac))
+                            .lineWidth(2)
+                            .label("");
+                    }
+                    Figure fig = {{plot}};
+                    Canvas canvas = {{fig}};
+                    canvas.size(1800, 1200);
+                    char pf[512]; snprintf(pf, sizeof(pf), "%s/intensity_spectrum.png", plotdir);
+                    canvas.save(pf);
+                    printf("  Written %s\n", pf);
+                }
+            }
+        }
+
+        // --- 2) Equilibrium data ---
+        {
+            char meanfile[512];
+            snprintf(meanfile, sizeof(meanfile), "%s/equilibrium_data_mean.dat", outdir);
+            FILE* f = fopen(meanfile, "r");
+            if (f) {
+                struct EqLine { double T, E, Eerr, A, Aerr, Cv, Cverr; };
+                std::vector<EqLine> data;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    EqLine el;
+                    if (sscanf(line, "%lf %lf %lf %lf %lf %lf %lf",
+                               &el.T, &el.E, &el.Eerr, &el.A, &el.Aerr, &el.Cv, &el.Cverr) == 7)
+                        data.push_back(el);
+                }
+                fclose(f);
+
+                int nd = (int)data.size();
+                if (nd > 0) {
+                    std::vector<double> vT(nd), vE(nd), vElo(nd), vEhi(nd);
+                    std::vector<double> vA(nd), vAlo(nd), vAhi(nd);
+                    std::vector<double> vCv(nd), vCvlo(nd), vCvhi(nd);
+                    for (int i = 0; i < nd; i++) {
+                        vT[i]   = data[i].T;
+                        vE[i]   = data[i].E;   vElo[i]  = data[i].E - data[i].Eerr;  vEhi[i]  = data[i].E + data[i].Eerr;
+                        vA[i]   = data[i].A;   vAlo[i]  = data[i].A - data[i].Aerr;  vAhi[i]  = data[i].A + data[i].Aerr;
+                        vCv[i]  = data[i].Cv;  vCvlo[i] = data[i].Cv - data[i].Cverr; vCvhi[i] = data[i].Cv + data[i].Cverr;
+                    }
+
+                    // Energy
+                    {
+                        Plot2D plot;
+                        plot.xlabel("Temperature T"); plot.ylabel("Energy  E/N");
+                        plot.fontName("Helvetica"); plot.fontSize(16);
+                        plot.legend().atTopRight();
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
+                        plot.gnuplot("set border lw 1.5");
+                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.drawCurvesFilled(vT, vElo, vEhi)
+                            .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
+                            .lineColor("#4393c3").lineWidth(0).labelNone();
+                        plot.drawCurve(vT, vE)
+                            .lineColor("#2166ac").lineWidth(2.5).label("E/N");
+                        Figure fig = {{plot}}; Canvas canvas = {{fig}}; canvas.size(1600, 1000);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/energy.png", plotdir);
+                        canvas.save(pf); printf("  Written %s\n", pf);
+                    }
+                    // MC Acceptance
+                    {
+                        Plot2D plot;
+                        plot.xlabel("Temperature T"); plot.ylabel("MC acceptance rate");
+                        plot.fontName("Helvetica"); plot.fontSize(16);
+                        plot.legend().atTopRight();
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
+                        plot.gnuplot("set border lw 1.5");
+                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.drawCurvesFilled(vT, vAlo, vAhi)
+                            .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
+                            .lineColor("#66c2a5").lineWidth(0).labelNone();
+                        plot.drawCurve(vT, vA)
+                            .lineColor("#1b7837").lineWidth(2.5).label("MC acceptance");
+                        Figure fig = {{plot}}; Canvas canvas = {{fig}}; canvas.size(1600, 1000);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/acceptance.png", plotdir);
+                        canvas.save(pf); printf("  Written %s\n", pf);
+                    }
+                    // Specific heat
+                    {
+                        Plot2D plot;
+                        plot.xlabel("Temperature T"); plot.ylabel("Specific heat  C_v");
+                        plot.fontName("Helvetica"); plot.fontSize(16);
+                        plot.legend().atTopRight();
+                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 0.8 dt 3");
+                        plot.gnuplot("set border lw 1.5");
+                        plot.gnuplot("set tics font 'Helvetica,13'");
+                        plot.drawCurvesFilled(vT, vCvlo, vCvhi)
+                            .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
+                            .lineColor("#f4a582").lineWidth(0).labelNone();
+                        plot.drawCurve(vT, vCv)
+                            .lineColor("#b2182b").lineWidth(2.5).label("C_v");
+                        Figure fig = {{plot}}; Canvas canvas = {{fig}}; canvas.size(1600, 1000);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/specific_heat.png", plotdir);
+                        canvas.save(pf); printf("  Written %s\n", pf);
+                    }
+                }
+            }
         }
     }
 

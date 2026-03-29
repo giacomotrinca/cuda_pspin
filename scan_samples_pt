@@ -6,7 +6,7 @@
 # Default parameters
 SIZE=18
 TMAX=0.7
-TMIN=0.00001
+TMIN=0.001
 NT=50
 J=1.0
 ITER=20

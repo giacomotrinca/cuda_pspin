@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <ctime>
 #include <cstdlib>
+#include <sys/prctl.h>
 
 #include "config.h"
 #include "mc.h"
@@ -76,6 +77,14 @@ int main(int argc, char** argv) {
     cfg.T = Tmax;  // initial T (overridden by per-replica betas)
 
     if (cfg.dev >= 0) CUDA_CHECK(cudaSetDevice(cfg.dev));
+
+    // Set process name for top/htop/btop
+    {
+        int lbl = (cfg.label >= 0) ? cfg.label : 0;
+        char pname[16];
+        snprintf(pname, sizeof(pname), "PT_N%d_NR%d_S%d", cfg.N, nrep_per_temp, lbl);
+        prctl(PR_SET_NAME, pname);
+    }
 
     // --- Temperature schedule (linear) ---
     double* T_sched    = new double[NT];

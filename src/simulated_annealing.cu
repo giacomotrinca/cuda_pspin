@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <sys/stat.h>
 #include <ctime>
+#include <sys/prctl.h>
 
 #include "config.h"
 #include "mc.h"
@@ -72,6 +73,14 @@ int main(int argc, char** argv) {
     // Select GPU device
     if (cfg.dev >= 0) {
         CUDA_CHECK(cudaSetDevice(cfg.dev));
+    }
+
+    // Set process name for top/htop/btop
+    {
+        int lbl = (cfg.label >= 0) ? cfg.label : 0;
+        char pname[16];
+        snprintf(pname, sizeof(pname), "SA_N%d_NR%d_S%d", cfg.N, cfg.nrep, lbl);
+        prctl(PR_SET_NAME, pname);
     }
 
     // Prepare output directory (always include sample label, default 0)

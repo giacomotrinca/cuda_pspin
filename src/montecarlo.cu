@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <sys/stat.h>
 #include <ctime>
+#include <sys/prctl.h>
 
 #include "config.h"
 #include "mc.h"
@@ -21,6 +22,14 @@
 
 int main(int argc, char** argv) {
     SimConfig cfg = parse_args(argc, argv);
+
+    // Set process name for top/htop/btop
+    {
+        int label = (cfg.label >= 0) ? cfg.label : 0;
+        char pname[16];
+        snprintf(pname, sizeof(pname), "MC_N%d_NR%d_S%d", cfg.N, cfg.nrep, label);
+        prctl(PR_SET_NAME, pname);
+    }
 
     // Select GPU device
     if (cfg.dev >= 0) {

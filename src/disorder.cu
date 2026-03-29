@@ -33,6 +33,14 @@ __global__ void scale_couplings_kernel(cuDoubleComplex* couplings, long long n, 
     }
 }
 
+// Kernel to zero out imaginary parts (couplings are real)
+__global__ void zero_imag_kernel(cuDoubleComplex* couplings, long long n) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        couplings[idx] = make_cuDoubleComplex(cuCreal(couplings[idx]), 0.0);
+    }
+}
+
 void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed) {
     long long n = (long long)N * N;
 
@@ -46,14 +54,15 @@ void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed
     CURAND_CHECK(curandGenerateNormalDouble(gen, d_raw, 2 * n, 0.0, 1.0));
     CURAND_CHECK(curandDestroyGenerator(gen));
 
-    // Variance of g2_ij: J^2 * 2! / (2*N) = J^2 / N
-    // Each component (re, im) gets variance J^2/(2N) so sigma_component = J/sqrt(2N)
-    // But we want variance of |g2|^2 = J^2/N, so sigma per component = J/sqrt(2N)
-    double sigma = J / sqrt(2.0 * N);
+    // Couplings are real: Var(g2) = J^2 / N, sigma = J / sqrt(N)
+    double sigma = J / sqrt((double)N);
 
     int block_size = 256;
     long long grid_size = (n + block_size - 1) / block_size;
     scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g2, n, sigma);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // Zero out imaginary parts: g2 are real
+    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g2, n);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
@@ -71,13 +80,15 @@ void generate_g4(cuDoubleComplex* d_g4, int N, double J, unsigned long long seed
     CURAND_CHECK(curandGenerateNormalDouble(gen, d_raw, count, 0.0, 1.0));
     CURAND_CHECK(curandDestroyGenerator(gen));
 
-    // Variance of g4_ijkl: J^2 * 4! / (2 * N^3) = 12 * J^2 / N^3
-    // sigma per component = sqrt(12 * J^2 / (2 * N^3)) = J * sqrt(6 / N^3)
-    double sigma = J * sqrt(6.0 / ((double)N * N * N));
+    // Couplings are real: Var(g4) = 12 * J^2 / N^3, sigma = J * sqrt(12 / N^3)
+    double sigma = J * sqrt(12.0 / ((double)N * N * N));
 
     int block_size = 256;
     long long grid_size = (nq + block_size - 1) / block_size;
     scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g4, nq, sigma);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // Zero out imaginary parts: g4 are real
+    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g4, nq);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 

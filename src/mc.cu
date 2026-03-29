@@ -114,7 +114,7 @@ __global__ void mc_sweep_kernel(
         double local_dE = 0.0;
 
         // --- H2: factored computation ---
-        // dE_H2 = -2 Re(delta_i * Sum_k g_{i0,k} conj(a_k)) + same for j0 + pair
+        // dE_H2 = -Re(delta_i * Sum_k g_{i0,k} conj(a_k)) + same for j0 + pair
         cuDoubleComplex sum_i = make_cuDoubleComplex(0.0, 0.0);
         cuDoubleComplex sum_j = make_cuDoubleComplex(0.0, 0.0);
         for (int k = tid; k < N; k += bdim) {
@@ -126,14 +126,14 @@ __global__ void mc_sweep_kernel(
                 sum_j = cuCadd(sum_j, cuCmul(g2[rj * N + cj], ak_c));
             }
         }
-        local_dE -= 2.0 * cuCreal(cuCmul(delta_i, sum_i));
-        local_dE -= 2.0 * cuCreal(cuCmul(delta_j, sum_j));
+        local_dE -= cuCreal(cuCmul(delta_i, sum_i));
+        local_dE -= cuCreal(cuCmul(delta_j, sum_j));
 
         if (tid == 0) {
             cuDoubleComplex gij = g2[i0 * N + j0]; // i0 < j0
             cuDoubleComplex old_p = cuCmul(gij, cuCmul(a_i_old, cuConj(a_j_old)));
             cuDoubleComplex new_p = cuCmul(gij, cuCmul(a_i_new, cuConj(a_j_new)));
-            local_dE -= 2.0 * (cuCreal(new_p) - cuCreal(old_p));
+            local_dE -= (cuCreal(new_p) - cuCreal(old_p));
         }
 
         // --- H4: three-type enumeration with differential for Types 1&2 ---
@@ -213,7 +213,7 @@ __global__ void mc_sweep_kernel(
                 cuDoubleComplex nl = (ll==i0) ? a_i_new : ((ll==j0) ? a_j_new : s_spins[ll]);
                 nj = cuConj(nj); nl = cuConj(nl);  // positions 1,3 conjugated
                 cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
-                local_dE -= 2.0 * (cuCreal(new_prod) - cuCreal(old_prod));
+                local_dE -= (cuCreal(new_prod) - cuCreal(old_prod));
             } else {
                 // Single spin changes: differential (halves cuCmul count)
                 int changed = (t < n_type12) ? i0 : j0;
@@ -224,7 +224,7 @@ __global__ void mc_sweep_kernel(
                 cuDoubleComplex f2 = (kk == changed) ? delta : s_spins[kk];
                 cuDoubleComplex f3 = (ll == changed) ? cuConj(delta) : cuConj(s_spins[ll]);
                 cuDoubleComplex diff = cuCmul(gq, cuCmul(cuCmul(f0, f1), cuCmul(f2, f3)));
-                local_dE -= 2.0 * cuCreal(diff);
+                local_dE -= cuCreal(diff);
             }
         }
 
@@ -302,7 +302,7 @@ __global__ void init_energy_kernel(
 
         cuDoubleComplex gij = g2[i * N + j];
         cuDoubleComplex prod = cuCmul(gij, cuCmul(spins[i], cuConj(spins[j])));
-        local_sum += -2.0 * cuCreal(prod);
+        local_sum += -cuCreal(prod);
     }
 
     // H4
@@ -328,7 +328,7 @@ __global__ void init_energy_kernel(
         cuDoubleComplex prod = cuCmul(gq, cuCmul(
             cuCmul(spins[ii], cuConj(spins[jj])),
             cuCmul(spins[kk], cuConj(spins[ll]))));
-        local_sum += -2.0 * cuCreal(prod);
+        local_sum += -cuCreal(prod);
     }
 
     sdata[tid] = local_sum;
