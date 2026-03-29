@@ -3,8 +3,8 @@
 # Launcher for PT analysis binary (bin/analysis_pt)
 
 SIZE=18
-NT=20
-NREP=2
+NT=50
+NREP=1
 
 for arg in "$@"; do
     case "$arg" in

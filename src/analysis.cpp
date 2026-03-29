@@ -7,6 +7,80 @@
 #include <algorithm>
 #include <dirent.h>
 #include <regex.h>
+#include <sys/stat.h>
+
+// ================================================================
+// Intensity spectrum helpers
+// ================================================================
+
+// Read frequencies from frequencies.txt in a data directory
+static std::vector<double> read_frequencies(const char* datadir, int N) {
+    char freqfile[512];
+    snprintf(freqfile, sizeof(freqfile), "%s/frequencies.txt", datadir);
+    std::vector<double> omega(N);
+    FILE* ff = fopen(freqfile, "r");
+    if (ff) {
+        char line[256];
+        while (fgets(line, sizeof(line), ff)) {
+            if (line[0] == '#' || line[0] == '\n') continue;
+            int idx; double w;
+            if (sscanf(line, "%d %lf", &idx, &w) == 2 && idx >= 0 && idx < N)
+                omega[idx] = w;
+        }
+        fclose(ff);
+    } else {
+        for (int k = 0; k < N; k++)
+            omega[k] = (N > 1) ? (double)k / (double)(N - 1) : 0.0;
+    }
+    return omega;
+}
+
+// Read a binary config (2N doubles: re0 im0 re1 im1 ...) and compute
+// normalized intensities I_k = |a_k|^2 / sum_j |a_j|^2
+static bool read_config_intensities(const char* filename, int N,
+                                    std::vector<double>& Ik) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) return false;
+    std::vector<double> buf(2 * N);
+    size_t nr = fread(buf.data(), sizeof(double), 2 * N, f);
+    fclose(f);
+    if ((int)nr != 2 * N) return false;
+    Ik.resize(N);
+    double total = 0;
+    for (int k = 0; k < N; k++) {
+        double re = buf[2*k], im = buf[2*k + 1];
+        Ik[k] = re * re + im * im;
+        total += Ik[k];
+    }
+    if (total > 0)
+        for (int k = 0; k < N; k++) Ik[k] /= total;
+    return true;
+}
+
+// Find config files matching conf_r{rep}_iter*.bin in confdir
+static std::vector<std::string> find_configs_mc(const char* confdir, int rep) {
+    std::vector<std::string> files;
+    char prefix[128];
+    snprintf(prefix, sizeof(prefix), "conf_r%d_iter", rep);
+    int plen = (int)strlen(prefix);
+    DIR* dir = opendir(confdir);
+    if (!dir) return files;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (strncmp(ent->d_name, prefix, plen) == 0) {
+            const char* rest = ent->d_name + plen;
+            if (strstr(rest, ".bin")) {
+                char fp[768];
+                snprintf(fp, sizeof(fp), "%s/%s", confdir, ent->d_name);
+                files.push_back(fp);
+            }
+        }
+    }
+    closedir(dir);
+    return files;
+}
+
+// ================================================================
 
 struct DataPoint {
     int iter;
@@ -92,10 +166,24 @@ static std::vector<int> find_samples(int N, int nrep) {
     return labels;
 }
 
+static void mkdir_p(const char* path) {
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char* p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>]\n", prog);
     fprintf(stderr, "  Without -label: averages over all samples S0, S1, ...\n");
     fprintf(stderr, "  With -label L:  analyzes single sample SL only\n");
+    fprintf(stderr, "  -T: simulation temperature (default 1.0, used for spectrum output)\n");
     exit(1);
 }
 
@@ -189,6 +277,7 @@ int main(int argc, char** argv) {
     int N = 0;
     int nrep = 1;
     int label = -1;
+    double T_sim = 1.0;
     std::string datadir_override;
 
     for (int i = 1; i < argc; i++) {
@@ -200,6 +289,8 @@ int main(int argc, char** argv) {
             label = atoi(argv[++i]);
         else if (strcmp(argv[i], "-datadir") == 0 && i + 1 < argc)
             datadir_override = argv[++i];
+        else if (strcmp(argv[i], "-T") == 0 && i + 1 < argc)
+            T_sim = atof(argv[++i]);
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);
@@ -368,6 +459,95 @@ int main(int argc, char** argv) {
         fprintf(fsum, "%.8f\t%.8f\n", mean_all, jk_err_all);
         fclose(fsum);
         printf("\nSample averages written to %s\n", sumfile);
+    }
+
+    // ================================================================
+    // Intensity Spectrum
+    // ================================================================
+    {
+        // Read frequencies from first valid sample
+        char refdir[256];
+        snprintf(refdir, sizeof(refdir), "data/N%d_NR%d_S%d",
+                 N, nrep, labels_valid[0]);
+        auto omega = read_frequencies(refdir, N);
+
+        // Per-sample mean spectrum
+        // spec_s[s][k] = <I_k> averaged over (replica, iteration) configs
+        std::vector<std::vector<double>> spec_s(S, std::vector<double>(N, 0.0));
+
+        for (int s = 0; s < S; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/N%d_NR%d_S%d",
+                     N, nrep, labels_valid[s]);
+            char confdir[512];
+            snprintf(confdir, sizeof(confdir), "%s/configs", sdir);
+
+            int nconfigs = 0;
+            for (int r = 0; r < nrep; r++) {
+                auto cfiles = find_configs_mc(confdir, r);
+                for (auto& cf : cfiles) {
+                    std::vector<double> Ik;
+                    if (read_config_intensities(cf.c_str(), N, Ik)) {
+                        for (int k = 0; k < N; k++)
+                            spec_s[s][k] += Ik[k];
+                        nconfigs++;
+                    }
+                }
+            }
+            if (nconfigs > 0) {
+                for (int k = 0; k < N; k++)
+                    spec_s[s][k] /= nconfigs;
+            }
+            printf("  Sample S%d: spectrum computed (%d configs)\n",
+                   labels_valid[s], nconfigs);
+        }
+
+        // Output directory
+        char outdir[256];
+        snprintf(outdir, sizeof(outdir), "analysis/MC_N%d_NR%d", N, nrep);
+        mkdir_p(outdir);
+
+        // Write intensity_spectrum.dat (single temperature block)
+        char specfile[512];
+        snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
+        FILE* fsp = fopen(specfile, "w");
+        if (fsp) {
+            fprintf(fsp, "# Intensity spectrum: I_k = |a_k|^2 / sum_j |a_j|^2\n");
+            fprintf(fsp, "# N=%d nrep=%d nsamples=%d T=%.8f\n", N, nrep, S, T_sim);
+            fprintf(fsp, "# Columns: frequency  Intensity  Error_jk  Temperature\n");
+
+            // Sort index by frequency
+            std::vector<int> order(N);
+            for (int k = 0; k < N; k++) order[k] = k;
+            std::sort(order.begin(), order.end(),
+                      [&](int a, int b) { return omega[a] < omega[b]; });
+
+            fprintf(fsp, "\n");
+            for (int ik = 0; ik < N; ik++) {
+                int k = order[ik];
+                double fI = 0;
+                for (int s = 0; s < S; s++)
+                    fI += spec_s[s][k];
+                fI /= S;
+
+                double jI = 0;
+                for (int j = 0; j < S; j++) {
+                    double lI = 0;
+                    for (int s = 0; s < S; s++) {
+                        if (s == j) continue;
+                        lI += spec_s[s][k];
+                    }
+                    lI /= (S - 1);
+                    jI += (lI - fI) * (lI - fI);
+                }
+                jI = sqrt((S - 1.0) / S * jI);
+
+                fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n",
+                        omega[k], fI, jI, T_sim);
+            }
+            fclose(fsp);
+            printf("  Written %s\n", specfile);
+        }
     }
 
     return 0;

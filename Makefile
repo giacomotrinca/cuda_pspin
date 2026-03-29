@@ -10,11 +10,18 @@ NVFLAGS = -std=c++11 -arch=sm_70 -O3 -Iinclude -DNDEBUG
 CXFLAGS = -std=c++11 -O3 -Wall -DNDEBUG
 LIBS    = -lcurand -lm
 
-.PHONY: all clean
+.PHONY: all clean mc sa pt analysis_mc analysis_sa analysis_pt
 
 all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
      bin/analysis bin/analysis_sa bin/analysis_pt
 	@echo "Done."
+
+mc:           dirs bin/pspin24
+sa:           dirs bin/simulated_annealing
+pt:           dirs bin/parallel_tempering
+analysis_mc:  dirs bin/analysis
+analysis_sa:  dirs bin/analysis_sa
+analysis_pt:  dirs bin/analysis_pt
 
 dirs:
 	@mkdir -p bin obj

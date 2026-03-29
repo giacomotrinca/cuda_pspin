@@ -1,0 +1,541 @@
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{physics}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\newcommand{\de}{\mathrm{d}}
+
+\title{Funzione di Partizione a Temperatura Infinita \\[4pt]
+       \large Vincolo sferico per spin complessi: $\sum_i |a_i|^2 = N$}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{Definizione del problema}
+%======================================================================
+
+Sia $a_i = \sigma_i + i\,\tau_i$ un numero complesso, con
+$\sigma_i, \tau_i \in \mathbb{R}$, per $i = 1, \dots, N$.
+Il modulo quadro è
+\begin{equation}
+  |a_i|^2 = \sigma_i^2 + \tau_i^2 .
+\end{equation}
+Vogliamo calcolare l'integrale
+\begin{equation}\label{eq:Z}
+  \mathcal{Z}
+  \;=\; \int \prod_{i=1}^{N} \de\sigma_i\,\de\tau_i \;\;
+        \delta\!\Bigl(N - \sum_{i=1}^{N} (\sigma_i^2 + \tau_i^2)\Bigr) .
+\end{equation}
+Questo è il volume dello spazio delle configurazioni a temperatura
+infinita ($\beta = 0$) sotto il vincolo sferico
+$\sum_i |a_i|^2 = N$.
+Geometricamente, $\mathcal{Z}$ è l'area della superficie della sfera
+$S^{2N-1}$ di raggio $R = \sqrt{N}$ in $\mathbb{R}^{2N}$.
+
+%======================================================================
+\section{Rappresentazione integrale della delta di Dirac}
+%======================================================================
+
+Il passo fondamentale, tipico della meccanica statistica, consiste
+nell'usare la rappresentazione integrale della delta di Dirac.  Per ogni
+$x \in \mathbb{R}$,
+\begin{equation}\label{eq:delta_fourier}
+  \delta(x) = \frac{1}{2\pi} \int_{-\infty}^{+\infty} \de\lambda \;
+              e^{i\lambda x} .
+\end{equation}
+Equivalentemente, ponendo $z = c + i\lambda$ con $c > 0$ fissato
+(contorno di Bromwich), si può scrivere
+\begin{equation}\label{eq:delta_laplace}
+  \delta(x) = \int_{c - i\infty}^{c + i\infty}
+              \frac{\de z}{2\pi i}\; e^{z\,x} .
+\end{equation}
+Useremo la forma~\eqref{eq:delta_laplace} perché garantisce la
+convergenza degli integrali gaussiani che seguiranno.
+
+%======================================================================
+\section{Inserimento della rappresentazione integrale}
+%======================================================================
+
+Sostituiamo l'Eq.~\eqref{eq:delta_laplace} nell'Eq.~\eqref{eq:Z},
+con argomento $x = N - \sum_i(\sigma_i^2 + \tau_i^2)$:
+\begin{equation}\label{eq:Z_step1}
+  \mathcal{Z}
+  = \int_{c - i\infty}^{c + i\infty} \frac{\de z}{2\pi i}\;
+    \int \prod_{i=1}^{N} \de\sigma_i\,\de\tau_i \;\;
+    \exp\!\Bigl[z\Bigl(N - \sum_{i=1}^{N}(\sigma_i^2 + \tau_i^2)\Bigr)\Bigr] .
+\end{equation}
+Separando nell'esponente la parte che dipende da $z$ e quella che
+dipende dagli spin:
+\begin{equation}\label{eq:Z_step2}
+  \mathcal{Z}
+  = \int_{c - i\infty}^{c + i\infty} \frac{\de z}{2\pi i}\;
+    e^{zN}\;
+    \prod_{i=1}^{N}
+    \underbrace{\int_{-\infty}^{+\infty} \de\sigma_i
+                \int_{-\infty}^{+\infty} \de\tau_i \;
+                e^{-z(\sigma_i^2 + \tau_i^2)}}_{I_1(z)} .
+\end{equation}
+L'integrale si è \emph{fattorizzato} in $N$ contributi identici
+$I_1(z)$: ciascuno è un integrale gaussiano bidimensionale nella
+variabile complessa $a_i$.
+Il contorno ha $\mathrm{Re}(z) = c > 0$, e ciò assicura che ogni
+gaussiana convergaa.
+
+%======================================================================
+\section{Calcolo dell'integrale a singolo sito}
+%======================================================================
+
+L'integrale a singolo sito è
+\begin{equation}
+  I_1(z) = \int_{-\infty}^{+\infty} \de\sigma \int_{-\infty}^{+\infty}
+           \de\tau \; e^{-z(\sigma^2 + \tau^2)} .
+\end{equation}
+Si fattorizza nelle due coordinate reali indipendenti:
+\begin{equation}
+  I_1(z) = \left(\int_{-\infty}^{+\infty} \de\sigma\; e^{-z\sigma^2}\right)
+           \left(\int_{-\infty}^{+\infty} \de\tau\; e^{-z\tau^2}\right) .
+\end{equation}
+Ciascun fattore è un integrale gaussiano standard.
+Per $\mathrm{Re}(z) > 0$:
+\begin{equation}
+  \int_{-\infty}^{+\infty} \de x \; e^{-zx^2}
+  = \sqrt{\frac{\pi}{z}} .
+\end{equation}
+Pertanto:
+\begin{equation}\label{eq:I1}
+  I_1(z) = \sqrt{\frac{\pi}{z}} \cdot \sqrt{\frac{\pi}{z}}
+         = \frac{\pi}{z} .
+\end{equation}
+
+%======================================================================
+\section{Riduzione a un integrale su $z$}
+%======================================================================
+
+Sostituendo l'Eq.~\eqref{eq:I1} nell'Eq.~\eqref{eq:Z_step2}:
+\begin{equation}
+  \prod_{i=1}^{N} I_1(z) = \left(\frac{\pi}{z}\right)^{\!N} ,
+\end{equation}
+e dunque
+\begin{equation}\label{eq:Z_contour}
+  \mathcal{Z}
+  = \pi^N \int_{c - i\infty}^{c + i\infty}
+    \frac{\de z}{2\pi i}\; \frac{e^{Nz}}{z^N} .
+\end{equation}
+Rimane un singolo integrale nel piano complesso.
+L'integrando $f(z) = e^{Nz}/z^N$ ha un \emph{polo di ordine $N$}
+nell'origine $z = 0$, ed è analitico altrove.
+
+%======================================================================
+\section{Calcolo per residui}
+%======================================================================
+
+Il contorno d'integrazione è una retta verticale $\mathrm{Re}(z) = c > 0$
+che racchiude il polo $z = 0$. Per il \textbf{teorema dei residui}:
+\begin{equation}\label{eq:residue_thm}
+  \int_{c - i\infty}^{c + i\infty} \frac{\de z}{2\pi i}\; \frac{e^{Nz}}{z^N}
+  = \mathrm{Res}_{z=0}\; \frac{e^{Nz}}{z^N} .
+\end{equation}
+
+\paragraph{Sviluppo di Taylor.}
+Espandiamo $e^{Nz}$ attorno a $z = 0$:
+\begin{equation}
+  e^{Nz} = \sum_{k=0}^{\infty} \frac{(Nz)^k}{k!}
+          = \sum_{k=0}^{\infty} \frac{N^k}{k!}\, z^k .
+\end{equation}
+
+\paragraph{Divisione per $z^N$.}
+\begin{equation}
+  \frac{e^{Nz}}{z^N}
+  = \sum_{k=0}^{\infty} \frac{N^k}{k!}\, z^{k - N} .
+\end{equation}
+
+\paragraph{Identificazione del residuo.}
+Il residuo di un polo in $z = 0$ è il coefficiente di $z^{-1}$ nella
+serie di Laurent. Il termine $z^{k-N}$ dà $z^{-1}$ quando
+\begin{equation}
+  k - N = -1 \qquad \Longrightarrow \qquad k = N - 1 .
+\end{equation}
+Dunque:
+\begin{equation}\label{eq:residuo}
+  \mathrm{Res}_{z=0}\; \frac{e^{Nz}}{z^N}
+  = \frac{N^{N-1}}{(N-1)!} .
+\end{equation}
+
+\paragraph{Risultato.}
+Sostituendo nell'Eq.~\eqref{eq:Z_contour}:
+\begin{equation}\label{eq:Z_exact}
+  \boxed{
+  \mathcal{Z}
+  = \frac{\pi^N \, N^{N-1}}{(N-1)!}
+  = \frac{\pi^N \, N^{N-1}}{\Gamma(N)}
+  }
+\end{equation}
+dove nell'ultimo passaggio abbiamo usato $\Gamma(N) = (N-1)!$ per
+$N$ intero positivo.
+
+%======================================================================
+\section{Verifica: coordinate ipersferiche}
+%======================================================================
+
+Verifichiamo il risultato con un calcolo diretto.  Introduciamo le
+coordinate ipersferiche in $\mathbb{R}^{2N}$, ponendo
+\begin{equation}
+  r^2 = \sum_{i=1}^{N} (\sigma_i^2 + \tau_i^2) ,
+\end{equation}
+cosicché l'elemento di volume si scrive
+\begin{equation}
+  \prod_{i=1}^{N} \de\sigma_i\,\de\tau_i
+  = r^{2N-1}\,\de r\;\de\Omega_{2N-1} ,
+\end{equation}
+dove $\de\Omega_{2N-1}$ è l'elemento d'angolo solido sulla sfera
+unitaria $S^{2N-1}$, il cui integrale totale è
+\begin{equation}\label{eq:solid_angle}
+  S_{2N-1} = \int \de\Omega_{2N-1}
+           = \frac{2\,\pi^N}{\Gamma(N)} .
+\end{equation}
+L'integrale~\eqref{eq:Z} diventa:
+\begin{equation}
+  \mathcal{Z}
+  = S_{2N-1} \int_0^{\infty} r^{2N-1}\,
+    \delta(N - r^2)\,\de r .
+\end{equation}
+
+\paragraph{Calcolo della delta composita.}
+Poiché $f(r) = N - r^2$ ha un unico zero $r_0 = \sqrt{N}$ per $r > 0$,
+e $f'(r_0) = -2\sqrt{N}$, dalla regola per la delta di una funzione:
+\begin{equation}
+  \delta(N - r^2) = \frac{\delta(r - \sqrt{N})}{|{-2\sqrt{N}}|}
+                  = \frac{\delta(r - \sqrt{N})}{2\sqrt{N}} .
+\end{equation}
+Sostituendo:
+\begin{equation}
+  \mathcal{Z}
+  = S_{2N-1} \cdot
+    \frac{(\sqrt{N})^{2N-1}}{2\sqrt{N}}
+  = \frac{2\pi^N}{\Gamma(N)} \cdot
+    \frac{N^{(2N-1)/2}}{2\,N^{1/2}} .
+\end{equation}
+Semplificando:
+\begin{equation}
+  \frac{N^{(2N-1)/2}}{N^{1/2}} = N^{(2N-2)/2} = N^{N-1} ,
+\end{equation}
+e dunque:
+\begin{equation}
+  \mathcal{Z}
+  = \frac{\pi^N\, N^{N-1}}{\Gamma(N)} . \qquad \checkmark
+\end{equation}
+Il risultato coincide esattamente con l'Eq.~\eqref{eq:Z_exact}.
+
+%======================================================================
+\section{Entropia a temperatura infinita}
+%======================================================================
+
+L'entropia (microcanonica) a $\beta = 0$ è
+\begin{equation}\label{eq:entropy}
+  \boxed{
+  S_\infty
+  = \ln \mathcal{Z}
+  = N \ln\pi + (N-1)\ln N - \ln\Gamma(N) .
+  }
+\end{equation}
+Questa espressione è \emph{esatta} per ogni $N$ intero positivo.
+
+%======================================================================
+\section{Distribuzione congiunta delle intensità $I_i = |a_i|^2/N$}
+%======================================================================
+
+Definiamo per ciascun modo l'\emph{intensità normalizzata}
+\begin{equation}\label{eq:Ii_def}
+  I_i \;=\; \frac{|a_i|^2}{N} \;=\; \frac{\sigma_i^2 + \tau_i^2}{N} ,
+  \qquad I_i \geq 0 .
+\end{equation}
+Il vincolo sferico $\sum_i |a_i|^2 = N$ diventa
+\begin{equation}\label{eq:simplex}
+  \sum_{i=1}^{N} I_i = 1 ,
+\end{equation}
+ossia le intensità vivono sul simplesso standard
+$\Delta_{N-1} \subset \mathbb{R}^N$.
+
+La distribuzione congiunta in $(\sigma_i, \tau_i)$ è
+\begin{equation}\label{eq:joint}
+  p(\{\sigma_i, \tau_i\})
+  = \frac{1}{\mathcal{Z}}\;
+    \delta\!\Bigl(N - \sum_{i=1}^{N} (\sigma_i^2 + \tau_i^2)\Bigr) .
+\end{equation}
+Vogliamo integrare sulle fasi e passare alle variabili $I_i$, ottenendo
+$p(\vec{I}) = p(I_1, \dots, I_N)$.
+
+%----------------------------------------------------------------------
+\subsection{Cambio di variabili}
+%----------------------------------------------------------------------
+
+Per ciascun modo, passiamo a coordinate polari nel piano complesso:
+\begin{equation}
+  \sigma_i = \sqrt{N I_i}\,\cos\theta_i , \qquad
+  \tau_i   = \sqrt{N I_i}\,\sin\theta_i ,
+\end{equation}
+con $I_i \geq 0$ e $\theta_i \in [0, 2\pi)$.  Lo Jacobiano è:
+\begin{equation}
+  \de\sigma_i\,\de\tau_i
+  = r_i\,\de r_i\,\de\theta_i
+  = \frac{1}{2}\,\de(r_i^2)\,\de\theta_i
+  = \frac{N}{2}\,\de I_i\,\de\theta_i .
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Integrazione sulle fasi}
+%----------------------------------------------------------------------
+
+Poiché la distribuzione~\eqref{eq:joint} non dipende dalle fasi
+$\theta_i$, l'integrazione sulle $N$ fasi dà semplicemente un fattore
+$(2\pi)^N$:
+\begin{align}
+  p(\vec{I})
+  &= \int_0^{2\pi}\!\!\cdots\!\int_0^{2\pi}
+     \prod_{i=1}^{N} \de\theta_i \;\;
+     p(\{\sigma_i,\tau_i\}) \cdot
+     \prod_{i=1}^{N} \frac{N}{2} \nonumber\\[6pt]
+  &= \frac{(2\pi)^N}{\mathcal{Z}}
+     \left(\frac{N}{2}\right)^{\!N}
+     \delta\!\Bigl(N - N\sum_{i=1}^{N} I_i\Bigr) .
+\end{align}
+Usando $\delta(Nx) = \delta(x)/N$\,:
+\begin{equation}\label{eq:pI_step}
+  p(\vec{I})
+  = \frac{(N\pi)^N}{N\,\mathcal{Z}}\;
+    \delta\!\Bigl(1 - \sum_{i=1}^{N} I_i\Bigr) .
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Sostituzione di $\mathcal{Z}$}
+%----------------------------------------------------------------------
+
+Dalla formula esatta~\eqref{eq:Z_exact},
+$\mathcal{Z} = \pi^N N^{N-1}/(N-1)!$\,. Sostituendo:
+\begin{equation}
+  \frac{(N\pi)^N}{N\,\mathcal{Z}}
+  = \frac{N^N\,\pi^N}{N} \cdot \frac{(N-1)!}{\pi^N\,N^{N-1}}
+  = \frac{N^N \,(N-1)!}{N \cdot N^{N-1}}
+  = (N-1)! .
+\end{equation}
+Pertanto:
+\begin{equation}\label{eq:joint_I}
+  \boxed{
+  p(I_1, \dots, I_N)
+  = (N-1)!\;\;\delta\!\Bigl(1 - \sum_{i=1}^{N} I_i\Bigr) ,
+  \qquad I_i \geq 0 .
+  }
+\end{equation}
+Le intensità sono \emph{uniformemente distribuite} sul simplesso
+$\Delta_{N-1}$. Il fattore $(N-1)!$ è esattamente l'inverso del volume
+del simplesso:
+\begin{equation}
+  \mathrm{Vol}(\Delta_{N-1})
+  = \int_{\substack{I_i \geq 0}} \prod_{i=1}^{N} \de I_i \;\;
+    \delta\!\Bigl(1 - \sum_{i} I_i\Bigr)
+  = \frac{1}{(N-1)!} ,
+\end{equation}
+e dunque la normalizzazione è verificata.
+
+Nella terminologia delle distribuzioni di probabilità,
+l'Eq.~\eqref{eq:joint_I} è una distribuzione di \textbf{Dirichlet}
+simmetrica con tutti i parametri uguali a $1$:
+\begin{equation}
+  \vec{I} \;\sim\; \mathrm{Dir}(\underbrace{1, 1, \dots, 1}_{N}) .
+\end{equation}
+
+%======================================================================
+\section{Distribuzione marginale di $I_k$}
+%======================================================================
+
+Dalla distribuzione congiunta~\eqref{eq:joint_I}, la marginale di un
+singolo modo $I_k$ si ottiene integrando su tutti gli altri:
+\begin{equation}\label{eq:marginal_Ik_def}
+  p(I_k)
+  = (N-1)! \int_{\substack{I_j \geq 0 \\ j \neq k}}
+    \prod_{j \neq k} \de I_j \;\;
+    \delta\!\Bigl(1 - I_k - \sum_{j \neq k} I_j\Bigr) .
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Volume del simplesso ridotto}
+%----------------------------------------------------------------------
+
+L'integrale residuo è sul simplesso in $N-1$ variabili
+$\{I_j\}_{j \neq k}$ con il vincolo
+$\sum_{j \neq k} I_j = 1 - I_k$.
+Per $0 \leq I_k \leq 1$, questo è un simplesso $\Delta_{N-2}$ riscalato
+di un fattore $(1 - I_k)$.
+Il volume di un $(M{-}1)$-simplesso riscalato $\{x_j \geq 0,\,
+\sum_j x_j = \Lambda\}$ in $M$ variabili è $\Lambda^{M-1}/(M-1)!$\,.
+Qui $M = N - 1$ e $\Lambda = 1 - I_k$, dunque:
+\begin{equation}\label{eq:simplex_volume}
+  \int_{\substack{I_j \geq 0 \\ j \neq k}}
+  \prod_{j \neq k} \de I_j \;\;
+  \delta\!\Bigl(1 - I_k - \sum_{j\neq k} I_j\Bigr)
+  = \frac{(1 - I_k)^{N-2}}{(N-2)!} .
+\end{equation}
+
+\paragraph{Dimostrazione.}
+Lo si verifica per induzione, o direttamente con il cambio di variabile
+$I_j = (1 - I_k)\,u_j$, che trasforma il vincolo in
+$\sum_{j \neq k} u_j = 1$ con $u_j \geq 0$, e il Jacobiano è
+$(1-I_k)^{N-2}$:
+\begin{equation}
+  \int \prod_{j \neq k} \de I_j \;\delta\!\Bigl(1 - I_k - \sum I_j\Bigr)
+  = (1-I_k)^{N-2}
+    \underbrace{\int \prod_{j \neq k} \de u_j \;\delta\!\Bigl(1 - \sum u_j\Bigr)}
+    _{\mathrm{Vol}(\Delta_{N-2}) = 1/(N-2)!} .
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Risultato}
+%----------------------------------------------------------------------
+
+Sostituendo l'Eq.~\eqref{eq:simplex_volume}
+nell'Eq.~\eqref{eq:marginal_Ik_def}:
+\begin{equation}
+  p(I_k)
+  = (N-1)! \cdot \frac{(1 - I_k)^{N-2}}{(N-2)!}
+  = (N-1)\,(1 - I_k)^{N-2} .
+\end{equation}
+Dunque:
+\begin{equation}\label{eq:marginal_Ik}
+  \boxed{
+  p(I_k) = (N-1)\,(1 - I_k)^{N-2} ,
+  \qquad 0 \leq I_k \leq 1 .
+  }
+\end{equation}
+Questa è una distribuzione $\mathrm{Beta}(1,\, N-1)$.
+
+%----------------------------------------------------------------------
+\subsection{Verifica della normalizzazione}
+%----------------------------------------------------------------------
+
+\begin{equation}
+  \int_0^1 p(I_k)\,\de I_k
+  = (N-1) \int_0^1 (1 - I_k)^{N-2}\,\de I_k
+  = (N-1) \cdot \frac{1}{N-1} = 1 . \qquad \checkmark
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Momenti}
+%----------------------------------------------------------------------
+
+\paragraph{Primo momento.}
+\begin{align}
+  \langle I_k \rangle
+  &= (N-1) \int_0^1 I\,(1-I)^{N-2}\,\de I \nonumber\\[4pt]
+  &= (N-1) \left[\frac{(1-I)^{N-1}}{-(N-1)}
+     - \frac{(1-I)^{N}}{N}\right]_0^1
+\end{align}
+integrando per parti, oppure più direttamente con $u = 1-I$:
+\begin{align}
+  &= (N-1)\int_0^1 (1-u)\,u^{N-2}\,\de u
+   = (N-1)\left[\frac{u^{N-1}}{N-1} - \frac{u^N}{N}\right]_0^1
+   \nonumber\\[4pt]
+  &= (N-1)\left(\frac{1}{N-1} - \frac{1}{N}\right)
+   = 1 - \frac{N-1}{N} = \frac{1}{N} .
+\end{align}
+Dunque:
+\begin{equation}
+  \boxed{
+  \langle I_k \rangle = \frac{1}{N} ,
+  \qquad
+  \langle |a_k|^2 \rangle = N\,\langle I_k \rangle = 1 ,
+  }
+\end{equation}
+come deve essere per simmetria ($\sum_k I_k = 1$ e tutti i modi sono
+equivalenti).
+
+\paragraph{Secondo momento.}
+Con $u = 1 - I$:
+\begin{align}
+  \langle I_k^2 \rangle
+  &= (N-1)\int_0^1 (1-u)^2\,u^{N-2}\,\de u \nonumber\\[4pt]
+  &= (N-1)\int_0^1 (1 - 2u + u^2)\,u^{N-2}\,\de u \nonumber\\[4pt]
+  &= (N-1)\left[\frac{1}{N-1} - \frac{2}{N} + \frac{1}{N+1}\right]
+   \nonumber\\[4pt]
+  &= 1 - \frac{2(N-1)}{N} + \frac{N-1}{N+1}
+   = \frac{N(N+1) - 2(N-1)(N+1) + N(N-1)}{N(N+1)} \nonumber\\[4pt]
+  &= \frac{2}{N(N+1)} .
+\end{align}
+
+\paragraph{Varianza.}
+\begin{equation}
+  \boxed{
+  \mathrm{Var}(I_k)
+  = \langle I_k^2 \rangle - \langle I_k \rangle^2
+  = \frac{2}{N(N+1)} - \frac{1}{N^2}
+  = \frac{N-1}{N^2(N+1)} .
+  }
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Relazione con la distribuzione in $(\sigma_k, \tau_k)$}
+%----------------------------------------------------------------------
+
+Per completezza, riscriviamo la marginale anche in termini della
+variabile originale $\rho = |a_k|^2 = N I_k$.
+Poiché $\de\rho = N\,\de I_k$:
+\begin{equation}
+  p(\rho) = \frac{1}{N}\,p\!\left(I_k = \frac{\rho}{N}\right)
+  = \frac{N-1}{N}\left(1 - \frac{\rho}{N}\right)^{\!N-2} ,
+  \qquad 0 \leq \rho \leq N ,
+\end{equation}
+e in $(\sigma_k, \tau_k)$, integrando la fase
+($\de\rho\,\de\theta/(2)$ con $\int_0^{2\pi}\de\theta = 2\pi$):
+\begin{equation}
+  p(\sigma_k, \tau_k)
+  = \frac{N-1}{\pi N}\left(1 - \frac{\sigma_k^2+\tau_k^2}{N}\right)^{\!N-2} ,
+  \qquad \sigma_k^2+\tau_k^2 \leq N .
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Limite $N \to \infty$}
+%----------------------------------------------------------------------
+
+Per $N \to \infty$ a $\rho = N I_k$ fissato, $(1 - I_k)^{N-2}
+= (1 - \rho/N)^{N-2} \to e^{-\rho}$, e le marginali diventano:
+\begin{align}
+  p(\sigma_k, \tau_k) &\;\xrightarrow{N\to\infty}\;
+  \frac{1}{\pi}\,e^{-(\sigma_k^2 + \tau_k^2)} , \\[6pt]
+  p(\rho) &\;\xrightarrow{N\to\infty}\; e^{-\rho} .
+\end{align}
+Ogni modo $a_k$ diventa una \emph{gaussiana complessa standard},
+$a_k \sim \mathcal{CN}(0,1)$, e $I_k$ diventa un'esponenziale
+riscalata: $N I_k \sim \mathrm{Exp}(1)$.
+
+%======================================================================
+\section{Interpretazione del moltiplicatore di Lagrange}
+%======================================================================
+
+Il parametro $z$ introdotto nella rappresentazione integrale della delta
+gioca il ruolo di un \emph{moltiplicatore di Lagrange} (o potenziale
+chimico) che impone il vincolo sferico.  Nella distribuzione a singolo
+sito $\propto e^{-z(\sigma^2 + \tau^2)}$, il valore di aspettazione di
+$|a_i|^2$ è:
+\begin{equation}
+  \langle |a_i|^2 \rangle_z
+  = \frac{\displaystyle\int \de\sigma\,\de\tau\;
+          (\sigma^2 + \tau^2)\,e^{-z(\sigma^2+\tau^2)}}
+         {\displaystyle\int \de\sigma\,\de\tau\;
+          e^{-z(\sigma^2+\tau^2)}}
+  = -\frac{\partial}{\partial z} \ln I_1(z)
+  = -\frac{\partial}{\partial z} \ln\frac{\pi}{z}
+  = \frac{1}{z} .
+\end{equation}
+Richiedendo che $\sum_i \langle |a_i|^2 \rangle = N$, ossia
+$N/z = N$, si ottiene $z = 1$. Questo è esattamente il valore del punto
+sella dell'integrale~\eqref{eq:Z_contour}, ed è l'analogo del parametro
+$\mu$ nel modello sferico di Berlin--Kac.
+
+\end{document}

@@ -337,20 +337,27 @@ int main(int argc, char** argv) {
 
             // Verbose output
             if (cfg.verbose >= 2) {
-                printf("  sweep %d/%d:\n", s + 1, cfg.mc_iterations);
-                for (int t = 0; t < NT; t++) {
-                    int phys = perm[t * nrep_per_temp]; // first copy
-                    double acc = (h_proposed[phys] > 0)
-                        ? (double)h_accepted[phys] / h_proposed[phys] : 0.0;
-                    printf("    T[%2d]=%.4f  E/N=%.6f  acc=%.3f",
-                           t, T_sched[t], h_energies[phys] / cfg.N, acc);
-                    if (t < NT - 1) {
-                        double ex = (ex_prop_total[t] > 0)
-                            ? (double)ex_acc_total[t] / ex_prop_total[t] : 0.0;
-                        printf("  ex=%.3f", ex);
-                    }
-                    printf("\n");
-                }
+                // Row format: sweep  E/N[NT-1]  ex[NT-1]  E/N[NT/2]  ex[NT/2]  E/N[0]  ex[0]
+                int t_cold = NT - 1;
+                int t_mid  = NT / 2;
+                int t_hot  = 0;
+
+                int phys_cold = perm[t_cold * nrep_per_temp];
+                int phys_mid  = perm[t_mid  * nrep_per_temp];
+                int phys_hot  = perm[t_hot  * nrep_per_temp];
+
+                double ex_cold = (t_cold < NT - 1 && ex_prop_total[t_cold] > 0)
+                    ? (double)ex_acc_total[t_cold] / ex_prop_total[t_cold] : 0.0;
+                double ex_mid  = (t_mid < NT - 1 && ex_prop_total[t_mid] > 0)
+                    ? (double)ex_acc_total[t_mid] / ex_prop_total[t_mid] : 0.0;
+                double ex_hot  = (t_hot < NT - 1 && ex_prop_total[t_hot] > 0)
+                    ? (double)ex_acc_total[t_hot] / ex_prop_total[t_hot] : 0.0;
+
+                printf("  %6d  E/N[%d]=%.4f ex=%.3f  E/N[%d]=%.4f ex=%.3f  E/N[%d]=%.4f ex=%.3f\n",
+                       s + 1,
+                       t_cold, h_energies[phys_cold] / cfg.N, ex_cold,
+                       t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,
+                       t_hot,  h_energies[phys_hot]  / cfg.N, ex_hot);
             } else if (cfg.verbose == 1) {
                 // Compact: one line with energy at coldest T
                 int phys_cold = perm[(NT - 1) * nrep_per_temp];

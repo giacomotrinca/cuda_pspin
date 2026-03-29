@@ -24,6 +24,56 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
+// ================================================================
+// Intensity spectrum helpers
+// ================================================================
+
+// Read frequencies from frequencies.txt in a data directory
+static std::vector<double> read_frequencies(const char* datadir, int N) {
+    char freqfile[512];
+    snprintf(freqfile, sizeof(freqfile), "%s/frequencies.txt", datadir);
+    std::vector<double> omega(N);
+    FILE* ff = fopen(freqfile, "r");
+    if (ff) {
+        char line[256];
+        while (fgets(line, sizeof(line), ff)) {
+            if (line[0] == '#' || line[0] == '\n') continue;
+            int idx; double w;
+            if (sscanf(line, "%d %lf", &idx, &w) == 2 && idx >= 0 && idx < N)
+                omega[idx] = w;
+        }
+        fclose(ff);
+    } else {
+        for (int k = 0; k < N; k++)
+            omega[k] = (N > 1) ? (double)k / (double)(N - 1) : 0.0;
+    }
+    return omega;
+}
+
+// Read a binary config (2N doubles: re0 im0 re1 im1 ...) and compute
+// normalized intensities I_k = |a_k|^2 / sum_j |a_j|^2
+static bool read_config_intensities(const char* filename, int N,
+                                    std::vector<double>& Ik) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) return false;
+    std::vector<double> buf(2 * N);
+    size_t nr = fread(buf.data(), sizeof(double), 2 * N, f);
+    fclose(f);
+    if ((int)nr != 2 * N) return false;
+    Ik.resize(N);
+    double total = 0;
+    for (int k = 0; k < N; k++) {
+        double re = buf[2*k], im = buf[2*k + 1];
+        Ik[k] = re * re + im * im;
+        total += Ik[k];
+    }
+    if (total > 0)
+        for (int k = 0; k < N; k++) Ik[k] /= total;
+    return true;
+}
+
+// ================================================================
+
 // One measurement row: T, sweep, and per-replica E/N and acceptance
 struct Row {
     double T;
@@ -339,6 +389,100 @@ int main(int argc, char** argv) {
         }
         fclose(fout);
         printf("  Written %s\n", outfile);
+    }
+
+    // ================================================================
+    // Intensity Spectrum
+    // ================================================================
+    {
+        // Read frequencies from reference sample
+        char refdir[256];
+        snprintf(refdir, sizeof(refdir), "data/SA_N%d_NR%d_S%d", N, nrep, labels[ref]);
+        auto omega = read_frequencies(refdir, N);
+
+        // Per-sample, per-temperature mean spectrum
+        // spec_s[s][ti][k] = <I_k> averaged over replicas for sample s at temp ti
+        std::vector<std::vector<std::vector<double>>> spec_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/SA_N%d_NR%d_S%d", N, nrep, labels[s]);
+            char confdir[512];
+            snprintf(confdir, sizeof(confdir), "%s/configs", sdir);
+
+            spec_s[s].resize(ntemps, std::vector<double>(N, 0.0));
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                int nconfigs = 0;
+
+                for (int r = 0; r < nrep; r++) {
+                    // SA config naming: conf_r{rep}_T{T:.6f}.bin
+                    char conffile[768];
+                    snprintf(conffile, sizeof(conffile),
+                             "%s/conf_r%d_T%.6f.bin", confdir, r, T);
+                    std::vector<double> Ik;
+                    if (read_config_intensities(conffile, N, Ik)) {
+                        for (int k = 0; k < N; k++)
+                            spec_s[s][ti][k] += Ik[k];
+                        nconfigs++;
+                    }
+                }
+
+                if (nconfigs > 0) {
+                    for (int k = 0; k < N; k++)
+                        spec_s[s][ti][k] /= nconfigs;
+                }
+            }
+            printf("  Sample S%d: spectrum computed\n", labels[s]);
+        }
+
+        // Write intensity_spectrum.dat: NT blocks, jackknife over samples
+        char specfile[512];
+        snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
+        FILE* fsp = fopen(specfile, "w");
+        if (fsp) {
+            fprintf(fsp, "# Intensity spectrum: I_k = |a_k|^2 / sum_j |a_j|^2\n");
+            fprintf(fsp, "# N=%d nrep=%d nsamples=%d\n", N, nrep, nsamples);
+            fprintf(fsp, "# Columns: frequency  Intensity  Error_jk  Temperature\n");
+            fprintf(fsp, "# %d temperature blocks separated by blank lines\n", ntemps);
+
+            // Sort index by frequency
+            std::vector<int> order(N);
+            for (int k = 0; k < N; k++) order[k] = k;
+            std::sort(order.begin(), order.end(),
+                      [&](int a, int b) { return omega[a] < omega[b]; });
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                fprintf(fsp, "\n");
+
+                for (int ik = 0; ik < N; ik++) {
+                    int k = order[ik];
+                    double fI = 0;
+                    for (int s = 0; s < nsamples; s++)
+                        fI += spec_s[s][ti][k];
+                    fI /= nsamples;
+
+                    double jI = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lI = 0;
+                        for (int s = 0; s < nsamples; s++) {
+                            if (s == j) continue;
+                            lI += spec_s[s][ti][k];
+                        }
+                        lI /= (nsamples - 1);
+                        jI += (lI - fI) * (lI - fI);
+                    }
+                    jI = sqrt((nsamples - 1.0) / nsamples * jI);
+
+                    fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n",
+                            omega[k], fI, jI, T);
+                }
+            }
+            fclose(fsp);
+            printf("  Written %s\n", specfile);
+        }
     }
 
     printf("\n── Done ────────────────────────────────────────────\n\n");
