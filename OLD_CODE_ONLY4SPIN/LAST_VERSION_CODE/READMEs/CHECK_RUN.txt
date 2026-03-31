@@ -1,0 +1,16 @@
+SMrandomTetrads.cu
+> Size
+> PLAQ_NUMBER
+> TWO_REPLICA and NREPLICAS
+> NSTEP
+> NITERATIONS (changes with NSTEP if 2^x steps is fixed)
+> NITER_MIN_PRINT (4 times less than NITERATIONS)
+> NITER_PRINT_CONF (better if it is a multiple of 2, like 8)
+> NTJUMPS
+> NPT (changes with NTJUMPS) 
+> USE_REDUCE_UNROLL (only if N>76)
+
+run_samples.sh
+> index i (# of samples)
+> T_min
+> DEV

@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
             printf("  -- T = %.6f  [step %d/%d] --\n", T, step + 1, ntemp);
             printf("  %6s", "sweep");
             for (int r = 0; r < cfg.nrep; r++)
-                printf("    E%d/N       acc%d  ", r, r);
+                printf("     E%d/N       acc%d   ", r, r);
             printf("\n");
         }
 
@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
                     for (int r = 0; r < cfg.nrep; r++) {
                         double acc = (h_proposed[r] > 0)
                             ? (double)h_accepted[r] / h_proposed[r] : 0.0;
-                        printf("  %10.6f  %.3f", h_energies[r] / cfg.N, acc);
+                        printf("  % .3e  % .3e", h_energies[r] / cfg.N, acc);
                     }
                     printf("\n");
                 }

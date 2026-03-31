@@ -52,6 +52,8 @@ struct BenchResult {
     double sweeps_per_sec;
     double spin_updates_per_ns;  // (nsweeps * N * n_pairs) / time_ns
     double mem_MB;
+    double acceptance_rate;      // mean acceptance rate across replicas
+    double total_throughput;     // nrep * sweeps_per_sec
 };
 
 // Run a single benchmark point
@@ -92,6 +94,18 @@ static BenchResult run_bench(int N, int nrep, int warmup, int nsweeps, int dev) 
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
 
+    // Read acceptance counters
+    std::vector<double> h_energies(nrep);
+    std::vector<long long> h_accepted(nrep), h_proposed(nrep);
+    mc_get_results(state, h_energies.data(), h_accepted.data(), h_proposed.data());
+
+    double mean_acc = 0;
+    for (int r = 0; r < nrep; r++) {
+        if (h_proposed[r] > 0)
+            mean_acc += (double)h_accepted[r] / h_proposed[r];
+    }
+    mean_acc /= nrep;
+
     mc_free(state);
 
     long long np = (long long)N * (N - 1) / 2;
@@ -106,29 +120,32 @@ static BenchResult run_bench(int N, int nrep, int warmup, int nsweeps, int dev) 
     res.sweeps_per_sec = nsweeps / (elapsed_ms * 1e-3);
     res.spin_updates_per_ns = (double)nsweeps * nrep * np / time_ns;
     res.mem_MB = estimate_gpu_bytes(N, nrep) / (1024.0 * 1024.0);
+    res.acceptance_rate = mean_acc;
+    res.total_throughput = nrep * res.sweeps_per_sec;
     return res;
 }
 
 static void print_header() {
-    printf("%-6s %-6s %-8s %-12s %-14s %-16s %-10s\n",
-           "N", "nrep", "sweeps", "time(ms)", "ms/sweep", "sweeps/s", "mem(MB)");
-    printf("----------------------------------------------------------------------\n");
+    printf("%-6s %-6s %-8s %-12s %-14s %-16s %-10s %-8s\n",
+           "N", "nrep", "sweeps", "time(ms)", "ms/sweep", "sweeps/s", "mem(MB)", "acc");
+    printf("--------------------------------------------------------------------------\n");
 }
 
 static void print_result(const BenchResult& r) {
-    printf("%-6d %-6d %-8d %-12.2f %-14.4f %-16.1f %-10.2f\n",
+    printf("%-6d %-6d %-8d %-12.2f %-14.4f %-16.1f %-10.2f %-8.4f\n",
            r.N, r.nrep, r.nsweeps, r.time_ms, r.ms_per_sweep,
-           r.sweeps_per_sec, r.mem_MB);
+           r.sweeps_per_sec, r.mem_MB, r.acceptance_rate);
 }
 
 static void write_tsv(const char* path, const std::vector<BenchResult>& results) {
     FILE* f = fopen(path, "w");
     if (!f) { fprintf(stderr, "Cannot open %s\n", path); return; }
-    fprintf(f, "N\tnrep\tnsweeps\ttime_ms\tms_per_sweep\tsweeps_per_sec\tspin_updates_per_ns\tmem_MB\n");
+    fprintf(f, "N\tnrep\tnsweeps\ttime_ms\tms_per_sweep\tsweeps_per_sec\tspin_updates_per_ns\tmem_MB\tacceptance_rate\ttotal_throughput\n");
     for (auto& r : results) {
-        fprintf(f, "%d\t%d\t%d\t%.4f\t%.6f\t%.2f\t%.6f\t%.2f\n",
+        fprintf(f, "%d\t%d\t%d\t%.4f\t%.6f\t%.2f\t%.6f\t%.2f\t%.6f\t%.2f\n",
                 r.N, r.nrep, r.nsweeps, r.time_ms, r.ms_per_sweep,
-                r.sweeps_per_sec, r.spin_updates_per_ns, r.mem_MB);
+                r.sweeps_per_sec, r.spin_updates_per_ns, r.mem_MB,
+                r.acceptance_rate, r.total_throughput);
     }
     fclose(f);
     printf("  Written %s\n", path);
@@ -160,6 +177,12 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaGetDevice(&device));
     CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
 
+    // Write GPU name to file for plot_benchmark / run_bench.sh
+    {
+        FILE* fgpu = fopen("bench_data/gpu_name.txt", "w");
+        if (fgpu) { fprintf(fgpu, "%s\n", prop.name); fclose(fgpu); }
+    }
+
     box_top();
     box_title("    p-Spin 2+4 — Monte Carlo Benchmark        ");
     box_bot();
@@ -170,14 +193,14 @@ int main(int argc, char** argv) {
     printf("  Timed:    %d sweeps\n", nsweeps);
     printf("\n");
 
-    // ========== Scan 1: Scaling with N (fixed nrep=50) ==========
+    // ========== Scan 1: Scaling with N (fixed nrep=4) ==========
     {
-        box_sec("Scaling with N (nrep=50)");
+        box_sec("Scaling with N (nrep=4)");
         print_header();
 
         int N_vals[] = {8, 10, 12, 14, 16, 18, 22, 26, 32, 40, 48, 64};
         int nN = sizeof(N_vals) / sizeof(N_vals[0]);
-        int fixed_nrep = 50;
+        int fixed_nrep = 4;
 
         std::vector<BenchResult> results;
         for (int i = 0; i < nN; i++) {
@@ -202,7 +225,7 @@ int main(int argc, char** argv) {
         box_sec("Scaling with nrep (N=18)");
         print_header();
 
-        int nrep_vals[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+        int nrep_vals[] = {1, 2, 4, 8, 16, 32, 64};
         int nR = sizeof(nrep_vals) / sizeof(nrep_vals[0]);
         int fixed_N = 18;
 
@@ -228,7 +251,7 @@ int main(int argc, char** argv) {
         box_sec("Scaling with nrep (N=32)");
         print_header();
 
-        int nrep_vals[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+        int nrep_vals[] = {1, 2, 4, 8, 16, 32, 64};
         int nR = sizeof(nrep_vals) / sizeof(nrep_vals[0]);
         int fixed_N = 32;
 

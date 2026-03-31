@@ -57,7 +57,7 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
 }
 
 // Kernel: compute H4 partial sums
-// H4 = -sum_{i<j<k<l} Re[ g4_ijkl * a_i * conj(a_j) * a_k * conj(a_l) ]
+// H4 = -sum_{i<j<k<l} Re[ g4_ijkl * a_i * conj(a_j) * conj(a_k) * a_l ]
 __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
                                   const cuDoubleComplex* g4,
                                   int N, double* partial_sums) {
@@ -96,11 +96,11 @@ __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
         cuDoubleComplex gq = g4[q_idx];
         cuDoubleComplex ai = spins[ii];
         cuDoubleComplex aj_conj = cuConj(spins[jj]);
-        cuDoubleComplex ak = spins[kk];
-        cuDoubleComplex al_conj = cuConj(spins[ll]);
+        cuDoubleComplex ak_conj = cuConj(spins[kk]);
+        cuDoubleComplex al = spins[ll];
 
-        // g4 * a_i * conj(a_j) * a_k * conj(a_l)
-        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(ai, aj_conj), cuCmul(ak, al_conj)));
+        // g4 * a_i * conj(a_j) * conj(a_k) * a_l  (positions 1,2 conjugated)
+        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(ai, aj_conj), cuCmul(ak_conj, al)));
         local_sum = -cuCreal(prod);
     }
 
@@ -126,21 +126,42 @@ static double reduce_partial_sums(double* d_partial, int n_blocks) {
     return total;
 }
 
+// ---------------------------------------------------------------------------
+// Auto-tune block sizes via occupancy API (cached per kernel)
+// ---------------------------------------------------------------------------
+
+static int optimal_bs_h2() {
+    static int bs = 0;
+    if (bs) return bs;
+    int mg; cudaOccupancyMaxPotentialBlockSize(&mg, &bs, energy_h2_kernel,
+        (size_t)0, 0);
+    if (bs < 32) bs = 32;
+    return bs;
+}
+static int optimal_bs_h4() {
+    static int bs = 0;
+    if (bs) return bs;
+    int mg; cudaOccupancyMaxPotentialBlockSize(&mg, &bs, energy_h4_kernel,
+        (size_t)0, 0);
+    if (bs < 32) bs = 32;
+    return bs;
+}
+
 double compute_energy(const cuDoubleComplex* d_spins,
                       const cuDoubleComplex* d_g2,
                       const cuDoubleComplex* d_g4,
                       int N) {
-    const int block_size = 256;
     double energy = 0.0;
 
     // H2 contribution
     {
+        int bs = optimal_bs_h2();
         long long np = n_pairs(N);
-        int n_blocks = (int)((np + block_size - 1) / block_size);
+        int n_blocks = (int)((np + bs - 1) / bs);
         double* d_partial;
         CUDA_CHECK(cudaMalloc(&d_partial, n_blocks * sizeof(double)));
 
-        energy_h2_kernel<<<n_blocks, block_size, block_size * sizeof(double)>>>(
+        energy_h2_kernel<<<n_blocks, bs, bs * sizeof(double)>>>(
             d_spins, d_g2, N, d_partial);
         CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -150,12 +171,13 @@ double compute_energy(const cuDoubleComplex* d_spins,
 
     // H4 contribution
     {
+        int bs = optimal_bs_h4();
         long long nq = n_quartets(N);
-        int n_blocks = (int)((nq + block_size - 1) / block_size);
+        int n_blocks = (int)((nq + bs - 1) / bs);
         double* d_partial;
         CUDA_CHECK(cudaMalloc(&d_partial, n_blocks * sizeof(double)));
 
-        energy_h4_kernel<<<n_blocks, block_size, block_size * sizeof(double)>>>(
+        energy_h4_kernel<<<n_blocks, bs, bs * sizeof(double)>>>(
             d_spins, d_g4, N, d_partial);
         CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -278,18 +300,18 @@ __global__ void delta_e_h4_kernel(
         if (involves) {
             cuDoubleComplex gq = g4[q_idx];
 
-            // Old contribution
-            cuDoubleComplex oi = spins[ii], oj = spins[jj];
-            cuDoubleComplex ok = cuConj(spins[kk]), ol = cuConj(spins[ll]);
-            cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj), cuCmul(ok, ol)));
+            // Old contribution: positions 0,3 unconjugated; 1,2 conjugated
+            cuDoubleComplex oi = spins[ii], oj_c = cuConj(spins[jj]);
+            cuDoubleComplex ok_c = cuConj(spins[kk]), ol = spins[ll];
+            cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj_c), cuCmul(ok_c, ol)));
 
             // New contribution: replace spins i0 and j0 with new values
             cuDoubleComplex ni = (ii == i0) ? a_i_new : ((ii == j0) ? a_j_new : spins[ii]);
             cuDoubleComplex nj = (jj == i0) ? a_i_new : ((jj == j0) ? a_j_new : spins[jj]);
             cuDoubleComplex nk = (kk == i0) ? a_i_new : ((kk == j0) ? a_j_new : spins[kk]);
             cuDoubleComplex nl = (ll == i0) ? a_i_new : ((ll == j0) ? a_j_new : spins[ll]);
+            nj = cuConj(nj);  // positions 1,2 conjugated
             nk = cuConj(nk);
-            nl = cuConj(nl);
 
             cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
 
@@ -308,6 +330,23 @@ __global__ void delta_e_h4_kernel(
     if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
 }
 
+static int optimal_bs_dh2() {
+    static int bs = 0;
+    if (bs) return bs;
+    int mg; cudaOccupancyMaxPotentialBlockSize(&mg, &bs, delta_e_h2_kernel,
+        (size_t)0, 0);
+    if (bs < 32) bs = 32;
+    return bs;
+}
+static int optimal_bs_dh4() {
+    static int bs = 0;
+    if (bs) return bs;
+    int mg; cudaOccupancyMaxPotentialBlockSize(&mg, &bs, delta_e_h4_kernel,
+        (size_t)0, 0);
+    if (bs < 32) bs = 32;
+    return bs;
+}
+
 double compute_delta_E_pair(
     const cuDoubleComplex* d_spins,
     const cuDoubleComplex* d_g2,
@@ -317,13 +356,13 @@ double compute_delta_E_pair(
     cuDoubleComplex a_i_new, cuDoubleComplex a_j_new,
     double* d_workspace
 ) {
-    const int block_size = 256;
     double dE = 0.0;
 
     // H2 delta
     {
-        int n_blocks = (N + block_size - 1) / block_size;
-        delta_e_h2_kernel<<<n_blocks, block_size, block_size * sizeof(double)>>>(
+        int bs = optimal_bs_dh2();
+        int n_blocks = (N + bs - 1) / bs;
+        delta_e_h2_kernel<<<n_blocks, bs, bs * sizeof(double)>>>(
             d_spins, d_g2, N, i, j, a_i_new, a_j_new, d_workspace);
         CUDA_CHECK(cudaDeviceSynchronize());
         dE += reduce_partial_sums(d_workspace, n_blocks);
@@ -331,11 +370,12 @@ double compute_delta_E_pair(
 
     // H4 delta
     {
+        int bs = optimal_bs_dh4();
         long long nq = n_quartets(N);
-        int n_blocks = (int)((nq + block_size - 1) / block_size);
+        int n_blocks = (int)((nq + bs - 1) / bs);
 
         // Reuse workspace (ensure it's large enough)
-        delta_e_h4_kernel<<<n_blocks, block_size, block_size * sizeof(double)>>>(
+        delta_e_h4_kernel<<<n_blocks, bs, bs * sizeof(double)>>>(
             d_spins, d_g4, N, i, j, a_i_new, a_j_new, d_workspace);
         CUDA_CHECK(cudaDeviceSynchronize());
         dE += reduce_partial_sums(d_workspace, n_blocks);

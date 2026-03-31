@@ -28,24 +28,68 @@
 #include <dirent.h>
 #include <sciplot/sciplot.hpp>
 
-// Color interpolation for temperature gradient (blue=cold, red=hot)
+// Color interpolation for temperature gradient (cool blue → warm red)
+// Uses a curated 5-stop gradient inspired by RdYlBu (reversed)
 static std::string temp_color(double frac) {
-    // Smooth blue -> teal -> gold -> red
-    double r, g, b;
-    if (frac < 0.33) {
-        double t = frac / 0.33;
-        r = 0.1 * t;         g = 0.2 + 0.5 * t;  b = 0.8 - 0.3 * t;
-    } else if (frac < 0.66) {
-        double t = (frac - 0.33) / 0.33;
-        r = 0.1 + 0.7 * t;  g = 0.7 - 0.1 * t;  b = 0.5 - 0.4 * t;
-    } else {
-        double t = (frac - 0.66) / 0.34;
-        r = 0.8 + 0.2 * t;  g = 0.6 - 0.5 * t;  b = 0.1 - 0.05 * t;
-    }
+    // frac in [0,1]:  0 = coldest (blue), 1 = hottest (red)
+    struct RGB { double r, g, b; };
+    // 5 control points: deep blue → sky → pale yellow → orange → crimson
+    static const RGB stops[] = {
+        {0.129, 0.400, 0.675},  // #2166AC  deep blue
+        {0.400, 0.663, 0.812},  // #67A9CF  sky blue
+        {0.545, 0.741, 0.341},  // #8BBD57  yellow-green
+        {0.906, 0.541, 0.384},  // #E78A62  warm orange
+        {0.698, 0.094, 0.169},  // #B2182B  crimson
+    };
+    const int ns = 5;
+    double t = frac * (ns - 1);
+    int i = (int)t;
+    if (i >= ns - 1) i = ns - 2;
+    double s = t - i;
+    double r = stops[i].r + s * (stops[i+1].r - stops[i].r);
+    double g = stops[i].g + s * (stops[i+1].g - stops[i].g);
+    double b = stops[i].b + s * (stops[i+1].b - stops[i].b);
     char hex[16];
     snprintf(hex, sizeof(hex), "#%02X%02X%02X",
              (int)(r*255), (int)(g*255), (int)(b*255));
     return hex;
+}
+
+// gnuplot palette matching temp_color stops
+static const char* TEMP_PALETTE =
+    "set palette defined ("
+    "0 '#2166AC', 0.25 '#67A9CF', 0.5 '#8BBD57', 0.75 '#E78A62', 1.0 '#B2182B'"
+    ")";
+
+// Common plot setup for analysis figures
+static void setup_analysis_plot(sciplot::Plot2D& plot) {
+    plot.fontName("Helvetica");
+    plot.fontSize(15);
+    plot.gnuplot("set border 3 lw 1.4 lc rgb '#2D2D2D'");
+    plot.gnuplot("set style line 100 lt 1 lc rgb '#E8E8E8' lw 0.6");
+    plot.gnuplot("set grid back ls 100");
+    plot.gnuplot("set tics nomirror out scale 0.6");
+    plot.gnuplot("set tics font 'Helvetica,12'");
+    plot.gnuplot("set lmargin 12");
+    plot.gnuplot("set rmargin 4");
+    plot.gnuplot("set tmargin 2");
+    plot.gnuplot("set bmargin 4.5");
+    plot.gnuplot("set key opaque box lc rgb '#CCCCCC' lw 0.5");
+    plot.gnuplot("set key spacing 1.3");
+}
+
+// Setup for plots with a temperature colorbar on the right
+static void setup_colorbar_plot(sciplot::Plot2D& plot,
+                                double Tmin, double Tmax) {
+    setup_analysis_plot(plot);
+    plot.gnuplot("set rmargin 14");  // room for colorbar
+    plot.gnuplot(TEMP_PALETTE);
+    char cbr[128];
+    snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
+    plot.gnuplot(cbr);
+    plot.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,13' offset 1,0");
+    plot.gnuplot("set cbtics font 'Helvetica,11'");
+    plot.gnuplot("set colorbox vertical user origin 0.88, 0.15 size 0.025, 0.7");
 }
 
 // ================================================================
@@ -157,6 +201,89 @@ static std::vector<std::string> find_configs_pt(const char* confdir,
     closedir(dir);
     return files;
 }
+
+// ----------------------------------------------------------------
+// ConfigStore: loads all spin configurations from configs.bin
+//              (new single-file format) or individual conf_T*_r*_iter*.bin
+//              files (old format).  Data is indexed by [tidx][rep].
+// ----------------------------------------------------------------
+struct ConfigStore {
+    struct Entry { int iter; std::vector<double> data; }; // 2*N doubles
+    std::vector<std::vector<std::vector<Entry>>> entries; // [tidx][rep]
+    int N, NT, nrep;
+
+    bool load(const char* datadir, int N_, int NT_, int nrep_) {
+        N = N_; NT = NT_; nrep = nrep_;
+        entries.assign(NT, std::vector<std::vector<Entry>>(nrep));
+
+        // Try configs.bin first
+        char binpath[512];
+        snprintf(binpath, sizeof(binpath), "%s/configs.bin", datadir);
+        FILE* f = fopen(binpath, "rb");
+        if (f) {
+            int hdr[3];
+            if (fread(hdr, sizeof(int), 3, f) == 3
+                && hdr[0] == N && hdr[1] == NT && hdr[2] == nrep) {
+                int rec = 2 * N;
+                while (true) {
+                    int sweep;
+                    if (fread(&sweep, sizeof(int), 1, f) != 1) break;
+                    bool ok = true;
+                    for (int t = 0; t < NT && ok; t++)
+                        for (int r = 0; r < nrep && ok; r++) {
+                            Entry e;
+                            e.iter = sweep;
+                            e.data.resize(rec);
+                            if ((int)fread(e.data.data(), sizeof(double), rec, f) != rec)
+                                ok = false;
+                            else
+                                entries[t][r].push_back(std::move(e));
+                        }
+                    if (!ok) break;
+                }
+                fclose(f);
+                return true;
+            }
+            fclose(f);
+        }
+
+        // Fallback: individual files in datadir/configs/
+        char confdir[512];
+        snprintf(confdir, sizeof(confdir), "%s/configs", datadir);
+        for (int t = 0; t < NT; t++)
+            for (int r = 0; r < nrep; r++) {
+                auto iters = find_config_iters(confdir, t, r);
+                for (int it : iters) {
+                    char fn[768];
+                    snprintf(fn, sizeof(fn), "%s/conf_T%d_r%d_iter%d.bin",
+                             confdir, t, r, it);
+                    FILE* fc = fopen(fn, "rb");
+                    if (!fc) continue;
+                    Entry e;
+                    e.iter = it;
+                    e.data.resize(2 * N);
+                    if ((int)fread(e.data.data(), sizeof(double), 2*N, fc) == 2*N)
+                        entries[t][r].push_back(std::move(e));
+                    fclose(fc);
+                }
+            }
+        return true;
+    }
+
+    std::vector<int> get_iters(int tidx, int rep) const {
+        std::vector<int> v;
+        if (tidx >= 0 && tidx < NT && rep >= 0 && rep < nrep)
+            for (auto& e : entries[tidx][rep]) v.push_back(e.iter);
+        return v;
+    }
+
+    const Entry* find_entry(int tidx, int rep, int iter) const {
+        if (tidx < 0 || tidx >= NT || rep < 0 || rep >= nrep) return nullptr;
+        for (auto& e : entries[tidx][rep])
+            if (e.iter == iter) return &e;
+        return nullptr;
+    }
+};
 
 // ================================================================
 struct Row {
@@ -892,8 +1019,8 @@ int main(int argc, char** argv) {
             char sdir[512];
             snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
                      N, NT, nrep, labels[s]);
-            char confdir[512];
-            snprintf(confdir, sizeof(confdir), "%s/configs", sdir);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
 
             spec_s[s].resize(ntemps, std::vector<double>(N, 0.0));
 
@@ -902,10 +1029,16 @@ int main(int argc, char** argv) {
                 int nconfigs = 0;
 
                 for (int r = 0; r < nrep; r++) {
-                    auto cfiles = find_configs_pt(confdir, tidx, r);
-                    for (auto& cf : cfiles) {
-                        std::vector<double> Ik;
-                        if (read_config_intensities(cf.c_str(), N, Ik)) {
+                    for (auto& entry : cstore.entries[tidx][r]) {
+                        double total = 0;
+                        std::vector<double> Ik(N);
+                        for (int k = 0; k < N; k++) {
+                            double re = entry.data[2*k], im = entry.data[2*k+1];
+                            Ik[k] = re * re + im * im;
+                            total += Ik[k];
+                        }
+                        if (total > 0) {
+                            for (int k = 0; k < N; k++) Ik[k] /= total;
                             for (int k = 0; k < N; k++)
                                 spec_s[s][ti][k] += Ik[k];
                             nconfigs++;
@@ -990,8 +1123,8 @@ int main(int argc, char** argv) {
             char sdir[512];
             snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
                      N, NT, nrep, labels[s]);
-            char confdir_base[512];
-            snprintf(confdir_base, sizeof(confdir_base), "%s/configs", sdir);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
 
             hist_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
 
@@ -1004,12 +1137,11 @@ int main(int argc, char** argv) {
                     if (ti >= ntemps) break;
 
                     int tidx = all_data[ref][ti].tidx;
-                    std::string confdir(confdir_base);
 
                     // Find iteration numbers common to all replicas
                     std::vector<std::vector<int>> rep_iters(nrep);
                     for (int r = 0; r < nrep; r++)
-                        rep_iters[r] = find_config_iters(confdir.c_str(), tidx, r);
+                        rep_iters[r] = cstore.get_iters(tidx, r);
 
                     std::vector<int> common_iters = rep_iters[0];
                     for (int r = 1; r < nrep; r++) {
@@ -1031,12 +1163,12 @@ int main(int argc, char** argv) {
                         std::vector<std::vector<double>> sre(nrep), sim(nrep);
                         bool all_ok = true;
                         for (int r = 0; r < nrep; r++) {
-                            char fn[768];
-                            snprintf(fn, sizeof(fn), "%s/conf_T%d_r%d_iter%d.bin",
-                                     confdir.c_str(), tidx, r, iter);
-                            if (!read_config_spins(fn, N, sre[r], sim[r])) {
-                                all_ok = false;
-                                break;
+                            auto* ep = cstore.find_entry(tidx, r, iter);
+                            if (!ep) { all_ok = false; break; }
+                            sre[r].resize(N); sim[r].resize(N);
+                            for (int k = 0; k < N; k++) {
+                                sre[r][k] = ep->data[2*k];
+                                sim[r][k] = ep->data[2*k+1];
                             }
                         }
                         if (!all_ok) continue;
@@ -1046,7 +1178,7 @@ int main(int argc, char** argv) {
                                 double re_sum = 0.0;
                                 for (int k = 0; k < N; k++)
                                     re_sum += sre[a][k] * sre[b][k] + sim[a][k] * sim[b][k];
-                                double q = re_sum / (2.0 * N);
+                                double q = re_sum / N;
 
                                 int bin = (int)((q - qmin) / dq);
                                 if (bin < 0) bin = 0;
@@ -1138,8 +1270,8 @@ int main(int argc, char** argv) {
             char sdir[512];
             snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
                      N, NT, nrep, labels[s]);
-            char confdir_base[512];
-            snprintf(confdir_base, sizeof(confdir_base), "%s/configs", sdir);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
 
             ifo_hist_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
 
@@ -1150,12 +1282,11 @@ int main(int argc, char** argv) {
                     if (ti >= ntemps) break;
 
                     int tidx = all_data[ref][ti].tidx;
-                    std::string confdir(confdir_base);
 
                     // Find iteration numbers common to all replicas
                     std::vector<std::vector<int>> rep_iters(nrep);
                     for (int r = 0; r < nrep; r++)
-                        rep_iters[r] = find_config_iters(confdir.c_str(), tidx, r);
+                        rep_iters[r] = cstore.get_iters(tidx, r);
 
                     std::vector<int> common_iters = rep_iters[0];
                     for (int r = 1; r < nrep; r++) {
@@ -1176,17 +1307,12 @@ int main(int argc, char** argv) {
                         Ik[r].resize(nsweeps_eq);
                         for (int ci = 0; ci < nsweeps_eq; ci++) {
                             int iter = common_iters[ci];
-                            char fn[768];
-                            snprintf(fn, sizeof(fn), "%s/conf_T%d_r%d_iter%d.bin",
-                                     confdir.c_str(), tidx, r, iter);
-                            std::vector<double> re, im;
-                            if (!read_config_spins(fn, N, re, im)) {
-                                all_ok = false;
-                                break;
-                            }
+                            auto* ep = cstore.find_entry(tidx, r, iter);
+                            if (!ep) { all_ok = false; break; }
                             Ik[r][ci].resize(N);
                             for (int k = 0; k < N; k++)
-                                Ik[r][ci][k] = re[k] * re[k] + im[k] * im[k];
+                                Ik[r][ci][k] = ep->data[2*k]*ep->data[2*k]
+                                             + ep->data[2*k+1]*ep->data[2*k+1];
                         }
                     }
                     if (!all_ok) continue;
@@ -1337,35 +1463,28 @@ int main(int argc, char** argv) {
 
                 if (!blocks.empty()) {
                     Plot2D plot;
-                    plot.xlabel("{/Times-Italic {/Symbol w}}");
-                    plot.ylabel("{/Times-Italic I}_{/Times-Italic k}");
-                    plot.fontName("Times");
-                    plot.fontSize(18);
-                    plot.legend().hide();
                     int nb = (int)blocks.size();
                     double Tmin = blocks.back()[0].T;
                     double Tmax = blocks.front()[0].T;
-                    // Colorbar: same blue->teal->gold->red gradient
-                    plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
-                    char cbr[128];
-                    snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
-                    plot.gnuplot(cbr);
-                    plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
-                    plot.gnuplot("set colorbox");
+                    setup_colorbar_plot(plot, Tmin, Tmax);
+                    plot.xlabel("{/Helvetica-Oblique {/Symbol w}}");
+                    plot.ylabel("{/Helvetica-Oblique I}_{/Helvetica-Oblique k}");
+                    plot.legend().hide();
                     for (int bi = 0; bi < nb; bi++) {
                         auto& bl = blocks[bi];
                         int n = (int)bl.size();
                         std::vector<double> vx(n), vy(n);
                         for (int i = 0; i < n; i++) { vx[i] = bl[i].omega; vy[i] = bl[i].I; }
-                        double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                        char pcol[64];
+                        snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
                         plot.drawCurve(vx, vy)
-                            .lineColor(temp_color(frac))
+                            .lineColor(pcol)
                             .lineWidth(2)
                             .label("");
                     }
                     Figure fig = {{plot}};
                     Canvas canvas = {{fig}};
-                    canvas.size(1800, 1200);
+                    canvas.size(1000, 700);
                     char pngfile[512];
                     snprintf(pngfile, sizeof(pngfile), "%s/intensity_spectrum.png", plotdir);
                     canvas.save(pngfile);
@@ -1407,20 +1526,18 @@ int main(int argc, char** argv) {
                     // Energy plot
                     {
                         Plot2D plot;
-                        plot.xlabel("{/Times-Italic T}");
-                        plot.ylabel("{/Times-Italic E} / {/Times-Italic N}");
-                        plot.fontName("Times");
-                        plot.fontSize(18);
-                        plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                        setup_analysis_plot(plot);
+                        plot.xlabel("{/Helvetica-Oblique T}");
+                        plot.ylabel("{/Helvetica-Oblique E} / {/Helvetica-Oblique N}");
+                        plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vElo, vEhi)
                             .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
                             .lineColor("#4393c3").lineWidth(0).labelNone();
                         plot.drawCurve(vT, vE)
-                            .lineColor("#2166ac").lineWidth(2.5).label("E/N");
+                            .lineColor("#2166ac").lineWidth(2).label("E/N");
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
-                        canvas.size(1600, 1000);
+                        canvas.size(900, 600);
                         char pf[512]; snprintf(pf, sizeof(pf), "%s/energy.png", plotdir);
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
@@ -1428,20 +1545,18 @@ int main(int argc, char** argv) {
                     // MC Acceptance plot
                     {
                         Plot2D plot;
-                        plot.xlabel("{/Times-Italic T}");
+                        setup_analysis_plot(plot);
+                        plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("MC acceptance");
-                        plot.fontName("Times");
-                        plot.fontSize(18);
-                        plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                        plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vAlo, vAhi)
                             .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
                             .lineColor("#66c2a5").lineWidth(0).labelNone();
                         plot.drawCurve(vT, vA)
-                            .lineColor("#1b7837").lineWidth(2.5).label("MC acceptance");
+                            .lineColor("#1b7837").lineWidth(2).label("MC acceptance");
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
-                        canvas.size(1600, 1000);
+                        canvas.size(900, 600);
                         char pf[512]; snprintf(pf, sizeof(pf), "%s/acceptance.png", plotdir);
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
@@ -1449,20 +1564,18 @@ int main(int argc, char** argv) {
                     // Specific heat plot
                     {
                         Plot2D plot;
-                        plot.xlabel("{/Times-Italic T}");
-                        plot.ylabel("{/Times-Italic C}_{/Times-Italic v}");
-                        plot.fontName("Times");
-                        plot.fontSize(18);
-                        plot.legend().atTopRight();
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                        setup_analysis_plot(plot);
+                        plot.xlabel("{/Helvetica-Oblique T}");
+                        plot.ylabel("{/Helvetica-Oblique C}_{/Helvetica-Oblique v}");
+                        plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vCvlo, vCvhi)
                             .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
                             .lineColor("#f4a582").lineWidth(0).labelNone();
                         plot.drawCurve(vT, vCv)
-                            .lineColor("#b2182b").lineWidth(2.5).label("C_v");
+                            .lineColor("#b2182b").lineWidth(2).label("C_v");
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
-                        canvas.size(1600, 1000);
+                        canvas.size(900, 600);
                         char pf[512]; snprintf(pf, sizeof(pf), "%s/specific_heat.png", plotdir);
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
@@ -1499,20 +1612,18 @@ int main(int argc, char** argv) {
                         vRhi[i] = data[i].rate + data[i].err;
                     }
                     Plot2D plot;
-                    plot.xlabel("{/Times-Italic T}");
+                    setup_analysis_plot(plot);
+                    plot.xlabel("{/Helvetica-Oblique T}");
                     plot.ylabel("PT exchange rate");
-                    plot.fontName("Times");
-                    plot.fontSize(18);
-                    plot.legend().atTopRight();
-                    plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
+                    plot.legend().atTopRight().fontSize(12);
                     plot.drawCurvesFilled(vT, vRlo, vRhi)
                         .fillColor("#8da0cb").fillIntensity(0.35).fillTransparent()
                         .lineColor("#8da0cb").lineWidth(0).labelNone();
                     plot.drawCurve(vT, vR)
-                        .lineColor("#542788").lineWidth(2.5).label("PT exchange");
+                        .lineColor("#542788").lineWidth(2).label("PT exchange");
                     Figure fig = {{plot}};
                     Canvas canvas = {{fig}};
-                    canvas.size(1600, 1000);
+                    canvas.size(900, 600);
                     char pf[512]; snprintf(pf, sizeof(pf), "%s/exchange_rates.png", plotdir);
                     canvas.save(pf);
                     printf("  Written %s\n", pf);
@@ -1558,18 +1669,16 @@ int main(int argc, char** argv) {
                                                  int val_col, // 0=E, 1=A, 2=PT
                                                  const char* outname) {
                         Plot2D plot;
+                        setup_analysis_plot(plot);
                         plot.xlabel("sweep");
                         plot.ylabel(ylabel_str);
-                        plot.fontName("Times");
-                        plot.fontSize(18);
                         plot.legend().hide();
                         plot.gnuplot("set logscale x 2");
-                        plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
-                        plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
+                        plot.gnuplot(TEMP_PALETTE);
                         char cbr[128];
                         snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                         plot.gnuplot(cbr);
-                        plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
+                        plot.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,12'");
                         plot.gnuplot("set colorbox");
 
                         for (int bi = 0; bi < nb; bi++) {
@@ -1590,13 +1699,13 @@ int main(int argc, char** argv) {
                         }
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
-                        canvas.size(1800, 1200);
+                        canvas.size(1000, 700);
                         char pf[512]; snprintf(pf, sizeof(pf), "%s/%s", plotdir, outname);
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
                     };
 
-                    make_history_plot("{/Times-Italic E} / {/Times-Italic N}", 0, "energy_history.png");
+                    make_history_plot("{/Helvetica-Oblique E} / {/Helvetica-Oblique N}", 0, "energy_history.png");
                     make_history_plot("MC acceptance", 1, "acceptance_history.png");
                     make_history_plot("PT exchange rate", 2, "exchange_history.png");
                 }
@@ -1634,24 +1743,16 @@ int main(int argc, char** argv) {
 
             if (!oblocks.empty()) {
                 Plot2D plot;
-                plot.xlabel("{/Times-Italic q}");
-                plot.ylabel("{/Times-Italic P}({/Times-Italic q})");
-                plot.fontName("Times");
-                plot.fontSize(18);
+                plot.xlabel("{/Helvetica-Oblique q}");
+                plot.ylabel("{/Helvetica-Oblique P}({/Helvetica-Oblique q})");
                 plot.legend().hide();
-                plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                 plot.gnuplot("set logscale y 10");
                 plot.gnuplot("set format y '10^{%L}'");
 
                 int nb = (int)oblocks.size();
                 double Tmin_ov = oblocks.back()[0].T;
                 double Tmax_ov = oblocks.front()[0].T;
-                plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
-                char cbr[128];
-                snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin_ov, Tmax_ov);
-                plot.gnuplot(cbr);
-                plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
-                plot.gnuplot("set colorbox");
+                setup_colorbar_plot(plot, Tmin_ov, Tmax_ov);
 
                 for (int bi = 0; bi < nb; bi++) {
                     auto& bl = oblocks[bi];
@@ -1660,16 +1761,17 @@ int main(int argc, char** argv) {
                         if (bl[i].pq > 0) { vq.push_back(bl[i].q); vpq.push_back(bl[i].pq); }
                     }
                     if (vq.empty()) continue;
-                    double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                    char pcol[64];
+                    snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
                     plot.drawCurve(vq, vpq)
-                        .lineColor(temp_color(frac))
+                        .lineColor(pcol)
                         .lineWidth(2)
                         .label("");
                 }
 
                 Figure fig = {{plot}};
                 Canvas canvas = {{fig}};
-                canvas.size(1800, 1200);
+                canvas.size(1000, 700);
                 char pf[512]; snprintf(pf, sizeof(pf), "%s/parisi_overlap.png", plotdir);
                 canvas.save(pf);
                 printf("  Written %s\n", pf);
@@ -1706,24 +1808,16 @@ int main(int argc, char** argv) {
 
             if (!iblocks.empty()) {
                 Plot2D plot;
-                plot.xlabel("{/Times-Italic C}");
-                plot.ylabel("{/Times-Italic P}({/Times-Italic C})");
-                plot.fontName("Times");
-                plot.fontSize(18);
+                plot.xlabel("{/Helvetica-Oblique C}");
+                plot.ylabel("{/Helvetica-Oblique P}({/Helvetica-Oblique C})");
                 plot.legend().hide();
-                plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                 plot.gnuplot("set logscale y 10");
                 plot.gnuplot("set format y '10^{%L}'");
 
                 int nb = (int)iblocks.size();
                 double Tmin_if = iblocks.back()[0].T;
                 double Tmax_if = iblocks.front()[0].T;
-                plot.gnuplot("set palette defined (0 '#1A33CC', 0.33 '#1AB580', 0.66 '#CC9919', 1.0 '#FF1A0D')");
-                char cbr[128];
-                snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin_if, Tmax_if);
-                plot.gnuplot(cbr);
-                plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
-                plot.gnuplot("set colorbox");
+                setup_colorbar_plot(plot, Tmin_if, Tmax_if);
 
                 for (int bi = 0; bi < nb; bi++) {
                     auto& bl = iblocks[bi];
@@ -1732,16 +1826,17 @@ int main(int argc, char** argv) {
                         if (bl[i].pq > 0) { vc.push_back(bl[i].q); vpc.push_back(bl[i].pq); }
                     }
                     if (vc.empty()) continue;
-                    double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                    char pcol[64];
+                    snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
                     plot.drawCurve(vc, vpc)
-                        .lineColor(temp_color(frac))
+                        .lineColor(pcol)
                         .lineWidth(2)
                         .label("");
                 }
 
                 Figure fig = {{plot}};
                 Canvas canvas = {{fig}};
-                canvas.size(1800, 1200);
+                canvas.size(1000, 700);
                 char ipf[512]; snprintf(ipf, sizeof(ipf), "%s/ifo_overlap.png", plotdir);
                 canvas.save(ipf);
                 printf("  Written %s\n", ipf);

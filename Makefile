@@ -1,4 +1,5 @@
-# p-Spin 2+4 -- CUDA 9.1 / gcc 7.5 / V100S (sm_70)
+# p-Spin 2+4 -- CUDA build
+# Default: V100S (sm_70).   Use  make ... visnu=1  for GTX 680 (sm_30).
 
 NVCC    = nvcc
 CXX     = g++
@@ -6,7 +7,13 @@ CXX     = g++
 # shared library objects (everything except the three main programs)
 LIB_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
 
-NVFLAGS = -std=c++11 -arch=sm_70 -O3 -Iinclude -DNDEBUG
+ifdef visnu
+  ARCH = sm_30
+else
+  ARCH = sm_70
+endif
+
+NVFLAGS = -std=c++11 -arch=$(ARCH) -O3 -Iinclude -DNDEBUG
 CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 

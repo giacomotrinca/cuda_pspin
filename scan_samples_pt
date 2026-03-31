@@ -5,20 +5,21 @@
 
 # Default parameters
 SIZE=18
-TMAX=0.7
+TMAX=1.6
 TMIN=0.1
 NT=36
 J=1.0
-ITER=20
+ITER=19
 SEED=$RANDOM
-NREP=1
+NREP=4
 PT_FREQ=64
-SAVE_FREQ=1024
-NSAMPLES=2
+SAVE_FREQ=256
+NSAMPLES=5
 DEV=0
 FMC=1
 GAMMA=""
-SHOW_OUTPUT=2
+SHOW_OUTPUT=0
+LOG_TEMP=0
 
 # Parse arguments
 for arg in "$@"; do
@@ -38,6 +39,7 @@ for arg in "$@"; do
         --fmc=*)       FMC="${arg#*=}" ;;
         --gamma=*)     GAMMA="${arg#*=}" ;;
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
+        --log-temp)    LOG_TEMP=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N        Number of spins (default: $SIZE)"
@@ -55,6 +57,7 @@ for arg in "$@"; do
             echo "  --fmc=M         FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
             echo "  --gamma=G       FMC gamma (default: auto)"
             echo "  --show-output=L Verbosity: 0=silent 1=compact 2=detailed (default: $SHOW_OUTPUT)"
+            echo "  --log-temp      Geometric temperature schedule: T_k = A*T_{k-1} (default: linear)"
             exit 0
             ;;
         *)
@@ -85,15 +88,16 @@ printf "  %-22s %s\n" "samples" "$NSAMPLES"
 printf "  %-22s %s\n" "seed (initial)" "$SEED"
 printf "  %-22s %s\n" "GPU device" "$DEV"
 if [ -n "$FMC" ]; then printf "  %-22s %s\n" "FMC mode" "$FMC"; fi
+if [ "$LOG_TEMP" -eq 1 ]; then printf "  %-22s %s\n" "T schedule" "geometric"; else printf "  %-22s %s\n" "T schedule" "linear"; fi
 echo ""
 
 for S in $(seq 0 $((NSAMPLES - 1))); do
     printf "── Sample %d/%d (seed=%s) " "$S" "$((NSAMPLES - 1))" "$SEED"
     printf '─%.0s' $(seq 1 28)
     printf "\n"
-    ./parallel_tempering --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT
+    ./parallel_tempering --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
     echo ""
-    SEED=$((SEED + 1))
+    SEED=$RANDOM
 done
 
 echo "── Done ─────────────────────────────────────────────"

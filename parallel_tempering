@@ -16,6 +16,7 @@ LABEL=""
 DEV=0
 FMC=1
 GAMMA=""
+LOG_TEMP=0
 
 # Parse arguments
 for arg in "$@"; do
@@ -35,6 +36,7 @@ for arg in "$@"; do
         --fmc=*)       FMC="${arg#*=}" ;;
         --gamma=*)     GAMMA="${arg#*=}" ;;
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
+        --log-temp)    LOG_TEMP=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N        Number of spins (default: $SIZE)"
@@ -52,6 +54,7 @@ for arg in "$@"; do
             echo "  --fmc=M         FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
             echo "  --gamma=G       FMC gamma (default: auto)"
             echo "  --show-output=L Verbosity: 0=silent 1=compact 2=detailed (default: $SHOW_OUTPUT)"
+            echo "  --log-temp      Geometric temperature schedule: T_k = A*T_{k-1} (default: linear)"
             exit 0
             ;;
         *)
@@ -82,6 +85,7 @@ printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
 printf "  %-22s %s\n" "seed" "$SEED"
 if [ -n "$DEV" ]; then printf "  %-22s %s\n" "GPU device" "$DEV"; fi
 if [ -n "$FMC" ]; then printf "  %-22s %s\n" "FMC mode" "$FMC"; fi
+if [ "$LOG_TEMP" -eq 1 ]; then printf "  %-22s %s\n" "T schedule" "geometric"; else printf "  %-22s %s\n" "T schedule" "linear"; fi
 echo ""
 
 VERBOSE_FLAG=""
@@ -109,6 +113,11 @@ if [ -n "$GAMMA" ]; then
     GAMMA_FLAG="-gamma $GAMMA"
 fi
 
+LOG_TEMP_FLAG=""
+if [ "$LOG_TEMP" -eq 1 ]; then
+    LOG_TEMP_FLAG="-log_temp"
+fi
+
 ./bin/parallel_tempering \
     -N "$SIZE" \
     -Tmax "$TMAX" -Tmin "$TMIN" -NT "$NT" \
@@ -118,4 +127,4 @@ fi
     -nrep "$NREP" \
     -pt_freq "$PT_FREQ" \
     -save_freq "$SAVE_FREQ" \
-    $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG $GAMMA_FLAG
+    $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG $GAMMA_FLAG $LOG_TEMP_FLAG

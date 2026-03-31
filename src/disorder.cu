@@ -54,15 +54,21 @@ void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed
     CURAND_CHECK(curandGenerateNormalDouble(gen, d_raw, 2 * n, 0.0, 1.0));
     CURAND_CHECK(curandDestroyGenerator(gen));
 
-    // Couplings are real: Var(g2) = J^2 / N, sigma = J / sqrt(N)
-    double sigma = J / sqrt((double)N);
+    // Generate with unit variance; actual scaling deferred until after FMC filter
+    int block_size = 256;
+    long long grid_size = (n + block_size - 1) / block_size;
+    // Zero out imaginary parts: g2 are real
+    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g2, n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
 
+void rescale_g2(cuDoubleComplex* d_g2, int N, double J, long long n_surviving) {
+    long long n = (long long)N * N;
+    // Var(g2) = J^2 * N / n_surviving
+    double sigma = J * sqrt((double)N / (double)n_surviving);
     int block_size = 256;
     long long grid_size = (n + block_size - 1) / block_size;
     scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g2, n, sigma);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    // Zero out imaginary parts: g2 are real
-    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g2, n);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
@@ -80,15 +86,21 @@ void generate_g4(cuDoubleComplex* d_g4, int N, double J, unsigned long long seed
     CURAND_CHECK(curandGenerateNormalDouble(gen, d_raw, count, 0.0, 1.0));
     CURAND_CHECK(curandDestroyGenerator(gen));
 
-    // Couplings are real: Var(g4) = 12 * J^2 / N^3, sigma = J * sqrt(12 / N^3)
-    double sigma = J * sqrt(12.0 / ((double)N * N * N));
+    // Generate with unit variance; actual scaling deferred until after FMC filter
+    int block_size = 256;
+    long long grid_size = (nq + block_size - 1) / block_size;
+    // Zero out imaginary parts: g4 are real
+    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g4, nq);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
 
+void rescale_g4(cuDoubleComplex* d_g4, int N, double J, long long n_surviving) {
+    long long nq = n_quartets(N);
+    // Var(g4) = J^2 * N / n_surviving
+    double sigma = J * sqrt((double)N / (double)n_surviving);
     int block_size = 256;
     long long grid_size = (nq + block_size - 1) / block_size;
     scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g4, nq, sigma);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    // Zero out imaginary parts: g4 are real
-    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g4, nq);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
@@ -128,10 +140,9 @@ __global__ void fmc_filter_g4_kernel(cuDoubleComplex* g4, const double* omega,
     jj--;
     rem -= (long long)jj * (jj - 1) / 2;
     int ii = (int)rem;
-    // FMC: for sorted ii<jj<kk<ll, condition on frequencies
-    // |omega_jj - omega_ii + omega_kk - omega_ll| > gamma => zero out
-    // equivalently |(omega_jj + omega_kk) - (omega_ii + omega_ll)| > gamma
-    double dw = fabs(omega[jj] - omega[ii] + omega[kk] - omega[ll]);
+    // FMC: for sorted ii<jj<kk<ll, conservation condition is
+    // omega_ii + omega_ll = omega_jj + omega_kk (outer pair = inner pair)
+    double dw = fabs(omega[ii] + omega[ll] - omega[jj] - omega[kk]);
     if (dw > gamma) {
         g4[q] = make_cuDoubleComplex(0.0, 0.0);
     }

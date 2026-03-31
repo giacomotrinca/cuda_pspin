@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     // --- Parse PT-specific args, filter the rest for parse_args ---
     double Tmax = -1.0, Tmin = -1.0;
     int NT = -1, pt_freq = -1;
+    int log_temp = 0;
 
     int new_argc = 0;
     char** new_argv = new char*[argc];
@@ -48,6 +49,8 @@ int main(int argc, char** argv) {
             NT = atoi(argv[++i]);
         else if (strcmp(argv[i], "-pt_freq") == 0 && i + 1 < argc)
             pt_freq = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-log_temp") == 0)
+            log_temp = 1;
         else
             new_argv[new_argc++] = argv[i];
     }
@@ -86,13 +89,23 @@ int main(int argc, char** argv) {
         prctl(PR_SET_NAME, pname);
     }
 
-    // --- Temperature schedule (linear) ---
+    // --- Temperature schedule ---
     double* T_sched    = new double[NT];
     double* beta_sched = new double[NT];
-    double dT = (NT > 1) ? (Tmax - Tmin) / (NT - 1) : 0.0;
-    for (int t = 0; t < NT; t++) {
-        T_sched[t]    = Tmax - t * dT;
-        beta_sched[t] = 1.0 / T_sched[t];
+    if (log_temp) {
+        // Geometric: T_0 = Tmax, T[NT-1] = Tmin, T_k = A * T_{k-1}
+        double A = (NT > 1) ? pow(Tmin / Tmax, 1.0 / (NT - 1)) : 1.0;
+        for (int t = 0; t < NT; t++) {
+            T_sched[t]    = Tmax * pow(A, t);
+            beta_sched[t] = 1.0 / T_sched[t];
+        }
+    } else {
+        // Linear: T_k = Tmax - k * dT
+        double dT = (NT > 1) ? (Tmax - Tmin) / (NT - 1) : 0.0;
+        for (int t = 0; t < NT; t++) {
+            T_sched[t]    = Tmax - t * dT;
+            beta_sched[t] = 1.0 / T_sched[t];
+        }
     }
 
     // --- Output directories ---
@@ -103,10 +116,6 @@ int main(int argc, char** argv) {
     mkdir("data", 0755);
     mkdir(datadir, 0755);
 
-    char confdir[256];
-    snprintf(confdir, sizeof(confdir), "%s/configs", datadir);
-    mkdir(confdir, 0755);
-
     // --- Open output files ---
     char efile[256], xfile[256];
     snprintf(efile, sizeof(efile), "%s/energy_accept.txt", datadir);
@@ -115,6 +124,17 @@ int main(int argc, char** argv) {
     FILE* fout = fopen(efile, "w");
     FILE* fex  = fopen(xfile, "w");
     if (!fout || !fex) { fprintf(stderr, "Cannot open output files\n"); return 2; }
+
+    // Configs: single binary file (header + appended snapshots)
+    char confbin[256];
+    snprintf(confbin, sizeof(confbin), "%s/configs.bin", datadir);
+    FILE* fconf = fopen(confbin, "wb");
+    if (!fconf) { fprintf(stderr, "Cannot open configs.bin\n"); return 2; }
+    // Header: N, NT, nrep_per_temp
+    {
+        int hdr[3] = { cfg.N, NT, nrep_per_temp };
+        fwrite(hdr, sizeof(int), 3, fconf);
+    }
 
     // Headers
     fprintf(fout, "# sweep\tTidx\tT");
@@ -155,7 +175,13 @@ int main(int argc, char** argv) {
         printf("  %-22s %d\n", "total replicas", total_replicas);
         printf("  %-22s %.6f\n", "Tmax", Tmax);
         printf("  %-22s %.6f\n", "Tmin", Tmin);
-        printf("  %-22s %.8f\n", "dT", dT);
+        if (log_temp) {
+            double A = (NT > 1) ? pow(Tmin / Tmax, 1.0 / (NT - 1)) : 1.0;
+            printf("  %-22s geometric (A=%.8f)\n", "T schedule", A);
+        } else {
+            double dT = (NT > 1) ? (Tmax - Tmin) / (NT - 1) : 0.0;
+            printf("  %-22s linear (dT=%.8f)\n", "T schedule", dT);
+        }
         printf("  %-22s %d\n", "MC sweeps", cfg.mc_iterations);
         printf("  %-22s %d\n", "pt_freq", pt_freq);
         printf("  %-22s %d\n", "save_freq", cfg.save_freq);
@@ -322,24 +348,20 @@ int main(int argc, char** argv) {
             // Save spin configurations only in second half of simulation
             if (s >= cfg.mc_iterations / 2) {
                 mc_get_spins(state, h_spins);
+                int sweep = s + 1;
+                fwrite(&sweep, sizeof(int), 1, fconf);
                 for (int t = 0; t < NT; t++) {
                     for (int r = 0; r < nrep_per_temp; r++) {
                         int phys = perm[t * nrep_per_temp + r];
-                        char conffile[512];
-                        snprintf(conffile, sizeof(conffile),
-                                 "%s/conf_T%d_r%d_iter%d.bin", confdir, t, r, s + 1);
-                        FILE* fc = fopen(conffile, "wb");
-                        if (fc) {
-                            cuDoubleComplex* rep = h_spins + (long long)phys * cfg.N;
-                            for (int i = 0; i < cfg.N; i++) {
-                                h_re_im[2*i]     = cuCreal(rep[i]);
-                                h_re_im[2*i + 1] = cuCimag(rep[i]);
-                            }
-                            fwrite(h_re_im, sizeof(double), 2 * cfg.N, fc);
-                            fclose(fc);
+                        cuDoubleComplex* rep = h_spins + (long long)phys * cfg.N;
+                        for (int i = 0; i < cfg.N; i++) {
+                            h_re_im[2*i]     = cuCreal(rep[i]);
+                            h_re_im[2*i + 1] = cuCimag(rep[i]);
                         }
+                        fwrite(h_re_im, sizeof(double), 2 * cfg.N, fconf);
                     }
                 }
+                fflush(fconf);
             }
 
             // Verbose output
@@ -353,14 +375,14 @@ int main(int argc, char** argv) {
                 int phys_mid  = perm[t_mid  * nrep_per_temp];
                 int phys_hot  = perm[t_hot  * nrep_per_temp];
 
-                double ex_cold = (t_cold < NT - 1 && ex_prop_total[t_cold] > 0)
-                    ? (double)ex_acc_total[t_cold] / ex_prop_total[t_cold] : 0.0;
+                double ex_cold = (t_cold > 0 && ex_prop_total[t_cold - 1] > 0)
+                    ? (double)ex_acc_total[t_cold - 1] / ex_prop_total[t_cold - 1] : 0.0;
                 double ex_mid  = (t_mid < NT - 1 && ex_prop_total[t_mid] > 0)
                     ? (double)ex_acc_total[t_mid] / ex_prop_total[t_mid] : 0.0;
                 double ex_hot  = (t_hot < NT - 1 && ex_prop_total[t_hot] > 0)
                     ? (double)ex_acc_total[t_hot] / ex_prop_total[t_hot] : 0.0;
 
-                printf("  %6d  E/N[%d]=%.4f ex=%.3f  E/N[%d]=%.4f ex=%.3f  E/N[%d]=%.4f ex=%.3f\n",
+                printf("  %6d  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e\n",
                        s + 1,
                        t_cold, h_energies[phys_cold] / cfg.N, ex_cold,
                        t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,
@@ -369,7 +391,7 @@ int main(int argc, char** argv) {
                 // Compact: one line with energy at coldest T
                 int phys_cold = perm[(NT - 1) * nrep_per_temp];
                 int phys_hot  = perm[0];
-                printf("  sweep %d/%d:  E_hot/N=%.4f  E_cold/N=%.4f\n",
+                printf("  sweep %d/%d:  E_hot/N=% .3e  E_cold/N=% .3e\n",
                        s + 1, cfg.mc_iterations,
                        h_energies[phys_hot] / cfg.N,
                        h_energies[phys_cold] / cfg.N);
@@ -413,6 +435,7 @@ int main(int argc, char** argv) {
     // Cleanup
     fclose(fout);
     fclose(fex);
+    fclose(fconf);
     delete[] T_sched;
     delete[] beta_sched;
     delete[] h_betas;

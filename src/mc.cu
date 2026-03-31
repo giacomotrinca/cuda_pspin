@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <algorithm>
 #include <curand_kernel.h>
 
 #define CUDA_CHECK(call) \
@@ -16,6 +17,23 @@
             exit(1); \
         } \
     } while(0)
+
+// atomicAdd(double*,double) is only hardware-native on sm_60+.
+// Provide a CAS-based fallback for older architectures (e.g. sm_30).
+// The guard uses defined(__CUDA_ARCH__) so it is emitted only during device
+// compilation, avoiding conflicts with CUDA's host-side declarations.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
+__device__ double atomicAdd(double* address, double val) {
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+                        __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+#endif
 
 // ============================================================================
 // Seed generation from master seed (splitmix64 on host)
@@ -64,11 +82,12 @@ __global__ void mc_sweep_kernel(
     int bdim = blockDim.x;
     int nwarps = bdim >> 5;
 
-    // Shared memory: [N spins][2 proposal][nwarps warp sums]
+    // Shared memory: [N spins][2 proposal][nwarps warp sums][2 pair indices]
     extern __shared__ char shared_buf[];
     cuDoubleComplex* s_spins = (cuDoubleComplex*)shared_buf;
     cuDoubleComplex* s_prop  = s_spins + N;
     double* s_warp = (double*)(s_prop + 2);
+    int* s_pair    = (int*)(s_warp + nwarps);  // s_pair[0]=i0, s_pair[1]=j0
 
     cuDoubleComplex* g_spins = all_spins + (long long)rep * N;
 
@@ -92,17 +111,33 @@ __global__ void mc_sweep_kernel(
     long long n_type3  = (long long)Nm2 * (Nm2 - 1) / 2;             // C(N-2,2)
     long long n_h4     = 2 * n_type12 + n_type3;
 
-    // ======== Sweep over all C(N,2) pairs ========
-    for (int i0 = 0; i0 < N; i0++) {
-      for (int j0 = i0 + 1; j0 < N; j0++) {
+    int n_steps = N / 2;  // Each step updates 2 spins → N total per sweep
 
-        // --- Propose rotation (thread 0) ---
+    // ======== Sweep: N/2 random pair proposals ========
+    for (int step = 0; step < n_steps; step++) {
+
+        // --- Choose random pair and propose rotation (thread 0) ---
         if (tid == 0) {
+            // Pick random i0 in [0, N-1]
+            int ri = (int)(curand_uniform_double(&rng) * N);
+            if (ri >= N) ri = N - 1;
+            // Pick random j0 in [0, N-2], skip i0
+            int rj = (int)(curand_uniform_double(&rng) * (N - 1));
+            if (rj >= N - 1) rj = N - 2;
+            if (rj >= ri) rj++;
+            // Ensure i0 < j0 for canonical ordering
+            int i0 = (ri < rj) ? ri : rj;
+            int j0 = (ri < rj) ? rj : ri;
+            s_pair[0] = i0;
+            s_pair[1] = j0;
             propose_pair_rotation(s_spins[i0], s_spins[j0], &rng,
                                   &s_prop[0], &s_prop[1]);
             loc_prop++;
         }
         __syncthreads();
+
+        int i0 = s_pair[0];
+        int j0 = s_pair[1];
 
         cuDoubleComplex a_i_new = s_prop[0];
         cuDoubleComplex a_j_new = s_prop[1];
@@ -205,24 +240,24 @@ __global__ void mc_sweep_kernel(
             if (is_type3) {
                 // Both i0 and j0 change: full old & new
                 cuDoubleComplex oi = s_spins[ii], oj_c = cuConj(s_spins[jj]);
-                cuDoubleComplex ok = s_spins[kk], ol_c = cuConj(s_spins[ll]);
-                cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj_c), cuCmul(ok, ol_c)));
+                cuDoubleComplex ok_c = cuConj(s_spins[kk]), ol = s_spins[ll];
+                cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj_c), cuCmul(ok_c, ol)));
                 cuDoubleComplex ni = (ii==i0) ? a_i_new : ((ii==j0) ? a_j_new : s_spins[ii]);
                 cuDoubleComplex nj = (jj==i0) ? a_i_new : ((jj==j0) ? a_j_new : s_spins[jj]);
                 cuDoubleComplex nk = (kk==i0) ? a_i_new : ((kk==j0) ? a_j_new : s_spins[kk]);
                 cuDoubleComplex nl = (ll==i0) ? a_i_new : ((ll==j0) ? a_j_new : s_spins[ll]);
-                nj = cuConj(nj); nl = cuConj(nl);  // positions 1,3 conjugated
+                nj = cuConj(nj); nk = cuConj(nk);  // positions 1,2 conjugated
                 cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
                 local_dE -= (cuCreal(new_prod) - cuCreal(old_prod));
             } else {
                 // Single spin changes: differential (halves cuCmul count)
                 int changed = (t < n_type12) ? i0 : j0;
                 cuDoubleComplex delta = (changed == i0) ? delta_i : delta_j;
-                // Positions 0,2 unconjugated; positions 1,3 conjugated
+                // Positions 0,3 unconjugated; positions 1,2 conjugated
                 cuDoubleComplex f0 = (ii == changed) ? delta : s_spins[ii];
                 cuDoubleComplex f1 = (jj == changed) ? cuConj(delta) : cuConj(s_spins[jj]);
-                cuDoubleComplex f2 = (kk == changed) ? delta : s_spins[kk];
-                cuDoubleComplex f3 = (ll == changed) ? cuConj(delta) : cuConj(s_spins[ll]);
+                cuDoubleComplex f2 = (kk == changed) ? cuConj(delta) : cuConj(s_spins[kk]);
+                cuDoubleComplex f3 = (ll == changed) ? delta : s_spins[ll];
                 cuDoubleComplex diff = cuCmul(gq, cuCmul(cuCmul(f0, f1), cuCmul(f2, f3)));
                 local_dE -= cuCreal(diff);
             }
@@ -257,7 +292,6 @@ __global__ void mc_sweep_kernel(
             }
         }
         __syncthreads();
-      }
     }
 
     // Write spins back to global memory
@@ -327,7 +361,7 @@ __global__ void init_energy_kernel(
         cuDoubleComplex gq = g4[q];
         cuDoubleComplex prod = cuCmul(gq, cuCmul(
             cuCmul(spins[ii], cuConj(spins[jj])),
-            cuCmul(spins[kk], cuConj(spins[ll]))));
+            cuCmul(cuConj(spins[kk]), spins[ll])));
         local_sum += -cuCreal(prod);
     }
 
@@ -372,14 +406,15 @@ MCState mc_init(const SimConfig& cfg) {
     // FMC filtering
     if (cfg.fmc_mode > 0) {
         state.h_omega = new double[N];
-        if (cfg.fmc_mode == 1) { // comb: omega_k = k/(N-1), equispaziato in [0,1]
-            for (int i = 0; i < N; i++) state.h_omega[i] = (double)i / (double)(N - 1);
-        } else { // uniform: omega_i ~ U[0,1]
+        if (cfg.fmc_mode == 1) { // comb: omega_k = k (interi, come nel legacy)
+            for (int i = 0; i < N; i++) state.h_omega[i] = (double)i;
+        } else { // uniform: omega_i ~ U[0,1], then sort
             uint64_t freq_state = cfg.seed + 3000;
             for (int i = 0; i < N; i++) {
                 uint64_t z = splitmix64(&freq_state);
                 state.h_omega[i] = (double)(z >> 11) / (double)(1ULL << 53);
             }
+            std::sort(state.h_omega, state.h_omega + N);
         }
         double* d_omega;
         CUDA_CHECK(cudaMalloc(&d_omega, N * sizeof(double)));
@@ -411,6 +446,10 @@ MCState mc_init(const SimConfig& cfg) {
         state.n_pairs_active = n_pairs(N);
         state.n_quart_active = n_quartets(N);
     }
+
+    // Rescale couplings with Var = J^2 * N / n_surviving
+    rescale_g2(state.d_g2, N, cfg.J, state.n_pairs_active);
+    rescale_g4(state.d_g4, N, cfg.J, state.n_quart_active);
 
     // Allocate per-replica spins
     CUDA_CHECK(cudaMalloc(&state.d_spins, (long long)nrep * N * sizeof(cuDoubleComplex)));
@@ -485,6 +524,49 @@ static __global__ void fill_double_kernel(double* arr, double val, int n) {
     if (idx < n) arr[idx] = val;
 }
 
+// ============================================================================
+// Compute optimal block size for mc_sweep_kernel via occupancy API.
+// shared_bytes depends on block_size (nwarps = block_size / 32), so we
+// manually probe candidate sizes with cudaOccupancyMaxActiveBlocksPerMultiprocessor.
+// Result is cached per N value.
+// ============================================================================
+static size_t sweep_smem(int N, int bs) {
+    int nw = bs >> 5;
+    return (size_t)(N + 2) * sizeof(cuDoubleComplex)
+         + (size_t)nw * sizeof(double)
+         + 2 * sizeof(int);
+}
+
+static int optimal_block_size_for_sweep(int N) {
+    static int cached_N = -1;
+    static int cached_bs = 256;
+    if (N == cached_N) return cached_bs;
+
+    static const int candidates[] = {32, 64, 128, 256, 512, 1024};
+    int best_bs = 256;
+    int best_occupancy = 0;
+    for (int c = 0; c < 6; ++c) {
+        int bs = candidates[c];
+        int num_blocks = 0;
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &num_blocks, mc_sweep_kernel,
+            bs, sweep_smem(N, bs));
+        int occupancy = num_blocks * bs;  // active threads per SM
+        if (occupancy > best_occupancy) {
+            best_occupancy = occupancy;
+            best_bs = bs;
+        }
+    }
+
+    if (best_bs < 32) best_bs = 32;
+
+    printf("[auto-tune] mc_sweep_kernel  N=%d  -> block_size=%d\n", N, best_bs);
+
+    cached_N  = N;
+    cached_bs = best_bs;
+    return best_bs;
+}
+
 void mc_sweep(MCState& state, const SimConfig& cfg) {
     int N = state.N;
     int nrep = state.nrep;
@@ -493,9 +575,10 @@ void mc_sweep(MCState& state, const SimConfig& cfg) {
     // Fill per-replica betas with uniform value
     fill_double_kernel<<<(nrep + 255) / 256, 256>>>(state.d_betas, beta, nrep);
 
-    int block_size = 256;
+    int block_size = optimal_block_size_for_sweep(N);
     int nwarps = block_size >> 5;
-    size_t shared_bytes = (N + 2) * sizeof(cuDoubleComplex) + nwarps * sizeof(double);
+    size_t shared_bytes = (N + 2) * sizeof(cuDoubleComplex) + nwarps * sizeof(double)
+                        + 2 * sizeof(int);
 
     mc_sweep_kernel<<<nrep, block_size, shared_bytes>>>(
         state.d_spins, state.d_g2, state.d_g4,
@@ -525,9 +608,10 @@ void mc_sweep_pt(MCState& state) {
     int N = state.N;
     int nrep = state.nrep;
 
-    int block_size = 256;
+    int block_size = optimal_block_size_for_sweep(N);
     int nwarps = block_size >> 5;
-    size_t shared_bytes = (N + 2) * sizeof(cuDoubleComplex) + nwarps * sizeof(double);
+    size_t shared_bytes = (N + 2) * sizeof(cuDoubleComplex) + nwarps * sizeof(double)
+                        + 2 * sizeof(int);
 
     mc_sweep_kernel<<<nrep, block_size, shared_bytes>>>(
         state.d_spins, state.d_g2, state.d_g4,

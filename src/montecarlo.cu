@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
                 for (int r = 0; r < cfg.nrep; r++) {
                     double acc = (h_proposed[r] > 0)
                         ? (double)h_accepted[r] / h_proposed[r] : 0.0;
-                    printf("  [%d] E/N=%.4f acc=%.3f", r, h_energies[r] / cfg.N, acc);
+                    printf("  [%d] E/N=% .3e acc=% .3e", r, h_energies[r] / cfg.N, acc);
                 }
                 printf("\n");
             }
@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
         for (int r = 0; r < cfg.nrep; r++) {
             double acc = (h_proposed[r] > 0)
                 ? (double)h_accepted[r] / h_proposed[r] : 0.0;
-            printf("  Replica %-12d E/N = %.6f   acc = %.4f\n",
+            printf("  Replica %-12d E/N = % .3e   acc = % .3e\n",
                    r, h_energies[r] / cfg.N, acc);
         }
         printf("\n");
