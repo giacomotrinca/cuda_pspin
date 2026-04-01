@@ -71,7 +71,8 @@ __global__ void mc_sweep_kernel(
     curandStatePhilox4_32_10_t* rng_states,  // [nrep]
     double* energies,             // [nrep]
     long long* accepted,          // [nrep]
-    long long* proposed           // [nrep]
+    long long* proposed,          // [nrep]
+    int h2_active                 // whether H2 terms are present
 ) {
     int rep = blockIdx.x;
     if (rep >= nrep) return;
@@ -110,6 +111,11 @@ __global__ void mc_sweep_kernel(
     long long n_type12 = (long long)Nm2 * (Nm2 - 1) * (Nm2 - 2) / 6; // C(N-2,3)
     long long n_type3  = (long long)Nm2 * (Nm2 - 1) / 2;             // C(N-2,2)
     long long n_h4     = 2 * n_type12 + n_type3;
+    long long nq = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;  // C(N,4)
+
+    // Conjugation masks per channel (bit p set = position p conjugated)
+    // ch 0: conj {kk,ll}  mask=0xC   ch 1: conj {jj,kk} mask=0x6   ch 2: conj {jj,ll} mask=0xA
+    const int conj_masks[3] = {0xC, 0x6, 0xA};
 
     int n_steps = N / 2;  // Each step updates 2 spins → N total per sweep
 
@@ -148,27 +154,28 @@ __global__ void mc_sweep_kernel(
 
         double local_dE = 0.0;
 
-        // --- H2: factored computation ---
-        // dE_H2 = -Re(delta_i * Sum_k g_{i0,k} conj(a_k)) + same for j0 + pair
-        cuDoubleComplex sum_i = make_cuDoubleComplex(0.0, 0.0);
-        cuDoubleComplex sum_j = make_cuDoubleComplex(0.0, 0.0);
-        for (int k = tid; k < N; k += bdim) {
-            if (k != i0 && k != j0) {
-                cuDoubleComplex ak_c = cuConj(s_spins[k]);
-                int ri = (i0 < k) ? i0 : k, ci = (i0 < k) ? k : i0;
-                sum_i = cuCadd(sum_i, cuCmul(g2[ri * N + ci], ak_c));
-                int rj = (j0 < k) ? j0 : k, cj = (j0 < k) ? k : j0;
-                sum_j = cuCadd(sum_j, cuCmul(g2[rj * N + cj], ak_c));
+        // --- H2: factored computation (skipped entirely when no pairs survive FMC) ---
+        if (h2_active) {
+            cuDoubleComplex sum_i = make_cuDoubleComplex(0.0, 0.0);
+            cuDoubleComplex sum_j = make_cuDoubleComplex(0.0, 0.0);
+            for (int k = tid; k < N; k += bdim) {
+                if (k != i0 && k != j0) {
+                    cuDoubleComplex ak_c = cuConj(s_spins[k]);
+                    int ri = (i0 < k) ? i0 : k, ci = (i0 < k) ? k : i0;
+                    sum_i = cuCadd(sum_i, cuCmul(g2[ri * N + ci], ak_c));
+                    int rj = (j0 < k) ? j0 : k, cj = (j0 < k) ? k : j0;
+                    sum_j = cuCadd(sum_j, cuCmul(g2[rj * N + cj], ak_c));
+                }
             }
-        }
-        local_dE -= cuCreal(cuCmul(delta_i, sum_i));
-        local_dE -= cuCreal(cuCmul(delta_j, sum_j));
+            local_dE -= cuCreal(cuCmul(delta_i, sum_i));
+            local_dE -= cuCreal(cuCmul(delta_j, sum_j));
 
-        if (tid == 0) {
-            cuDoubleComplex gij = g2[i0 * N + j0]; // i0 < j0
-            cuDoubleComplex old_p = cuCmul(gij, cuCmul(a_i_old, cuConj(a_j_old)));
-            cuDoubleComplex new_p = cuCmul(gij, cuCmul(a_i_new, cuConj(a_j_new)));
-            local_dE -= (cuCreal(new_p) - cuCreal(old_p));
+            if (tid == 0) {
+                cuDoubleComplex gij = g2[i0 * N + j0]; // i0 < j0
+                cuDoubleComplex old_p = cuCmul(gij, cuCmul(a_i_old, cuConj(a_j_old)));
+                cuDoubleComplex new_p = cuCmul(gij, cuCmul(a_i_new, cuConj(a_j_new)));
+                local_dE -= (cuCreal(new_p) - cuCreal(old_p));
+            }
         }
 
         // --- H4: three-type enumeration with differential for Types 1&2 ---
@@ -235,32 +242,47 @@ __global__ void mc_sweep_kernel(
             long long q = (long long)ll*(ll-1)*(ll-2)*(ll-3)/24
                         + (long long)kk*(kk-1)*(kk-2)/6
                         + (long long)jj*(jj-1)/2 + ii;
-            cuDoubleComplex gq = g4[q];
 
-            if (is_type3) {
-                // Both i0 and j0 change: full old & new
-                cuDoubleComplex oi = s_spins[ii], oj_c = cuConj(s_spins[jj]);
-                cuDoubleComplex ok_c = cuConj(s_spins[kk]), ol = s_spins[ll];
-                cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj_c), cuCmul(ok_c, ol)));
-                cuDoubleComplex ni = (ii==i0) ? a_i_new : ((ii==j0) ? a_j_new : s_spins[ii]);
-                cuDoubleComplex nj = (jj==i0) ? a_i_new : ((jj==j0) ? a_j_new : s_spins[jj]);
-                cuDoubleComplex nk = (kk==i0) ? a_i_new : ((kk==j0) ? a_j_new : s_spins[kk]);
-                cuDoubleComplex nl = (ll==i0) ? a_i_new : ((ll==j0) ? a_j_new : s_spins[ll]);
-                nj = cuConj(nj); nk = cuConj(nk);  // positions 1,2 conjugated
-                cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
-                local_dE -= (cuCreal(new_prod) - cuCreal(old_prod));
-            } else {
-                // Single spin changes: differential (halves cuCmul count)
-                int changed = (t < n_type12) ? i0 : j0;
-                cuDoubleComplex delta = (changed == i0) ? delta_i : delta_j;
-                // Positions 0,3 unconjugated; positions 1,2 conjugated
-                cuDoubleComplex f0 = (ii == changed) ? delta : s_spins[ii];
-                cuDoubleComplex f1 = (jj == changed) ? cuConj(delta) : cuConj(s_spins[jj]);
-                cuDoubleComplex f2 = (kk == changed) ? cuConj(delta) : cuConj(s_spins[kk]);
-                cuDoubleComplex f3 = (ll == changed) ? delta : s_spins[ll];
-                cuDoubleComplex diff = cuCmul(gq, cuCmul(cuCmul(f0, f1), cuCmul(f2, f3)));
-                local_dE -= cuCreal(diff);
-            }
+            // Loop over 3 interaction channels
+            for (int ch = 0; ch < 3; ch++) {
+                cuDoubleComplex gq = g4[(long long)ch * nq + q];
+                // Skip zero couplings (e.g. zeroed by FMC)
+                if (gq.x == 0.0 && gq.y == 0.0) continue;
+
+                int cm = conj_masks[ch];
+
+                if (is_type3) {
+                    // Both i0 and j0 change: full old & new
+                    int ids[4] = {ii, jj, kk, ll};
+                    cuDoubleComplex old_f[4], new_f[4];
+                    for (int p = 0; p < 4; p++) {
+                        cuDoubleComplex oval = s_spins[ids[p]];
+                        cuDoubleComplex nval;
+                        if (ids[p] == i0)      nval = a_i_new;
+                        else if (ids[p] == j0) nval = a_j_new;
+                        else                   nval = oval;
+                        old_f[p] = ((cm >> p) & 1) ? cuConj(oval) : oval;
+                        new_f[p] = ((cm >> p) & 1) ? cuConj(nval) : nval;
+                    }
+                    cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(old_f[0], old_f[1]),
+                                                                 cuCmul(old_f[2], old_f[3])));
+                    cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(new_f[0], new_f[1]),
+                                                                 cuCmul(new_f[2], new_f[3])));
+                    local_dE -= (cuCreal(new_prod) - cuCreal(old_prod));
+                } else {
+                    // Single spin changes: differential
+                    int changed = (t < n_type12) ? i0 : j0;
+                    cuDoubleComplex delta = (changed == i0) ? delta_i : delta_j;
+                    int ids[4] = {ii, jj, kk, ll};
+                    cuDoubleComplex f[4];
+                    for (int p = 0; p < 4; p++) {
+                        cuDoubleComplex base = (ids[p] == changed) ? delta : s_spins[ids[p]];
+                        f[p] = ((cm >> p) & 1) ? cuConj(base) : base;
+                    }
+                    cuDoubleComplex diff = cuCmul(gq, cuCmul(cuCmul(f[0], f[1]), cuCmul(f[2], f[3])));
+                    local_dE -= cuCreal(diff);
+                }
+            } // end channel loop
         }
 
         // --- Warp-shuffle reduction ---
@@ -314,7 +336,8 @@ __global__ void init_energy_kernel(
     const cuDoubleComplex* g2,
     const cuDoubleComplex* g4,
     int N, int nrep,
-    double* energies
+    double* energies,
+    int h2_active
 ) {
     int rep = blockIdx.y;
     if (rep >= nrep) return;
@@ -326,23 +349,33 @@ __global__ void init_energy_kernel(
     const cuDoubleComplex* spins = all_spins + (long long)rep * N;
     double local_sum = 0.0;
 
-    // H2
-    long long total_pairs = (long long)N * (N - 1) / 2;
-    for (long long p = (long long)blockIdx.x * bdim + tid; p < total_pairs;
-         p += (long long)gridDim.x * bdim) {
-        int j = (int)(0.5 + sqrt(0.25 + 2.0 * p));
-        int i = (int)(p - (long long)j * (j - 1) / 2);
-        if (i >= j) { j++; i = (int)(p - (long long)j * (j - 1) / 2); }
+    // H2 (skipped when h2_active==0, i.e. comb FMC)
+    if (h2_active) {
+        long long total_pairs = (long long)N * (N - 1) / 2;
+        for (long long p = (long long)blockIdx.x * bdim + tid; p < total_pairs;
+             p += (long long)gridDim.x * bdim) {
+            int j = (int)(0.5 + sqrt(0.25 + 2.0 * p));
+            int i = (int)(p - (long long)j * (j - 1) / 2);
+            if (i >= j) { j++; i = (int)(p - (long long)j * (j - 1) / 2); }
 
-        cuDoubleComplex gij = g2[i * N + j];
-        cuDoubleComplex prod = cuCmul(gij, cuCmul(spins[i], cuConj(spins[j])));
-        local_sum += -cuCreal(prod);
+            cuDoubleComplex gij = g2[i * N + j];
+            cuDoubleComplex prod = cuCmul(gij, cuCmul(spins[i], cuConj(spins[j])));
+            local_sum += -cuCreal(prod);
+        }
     }
 
-    // H4
-    long long total_q = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
-    for (long long q = (long long)blockIdx.x * bdim + tid; q < total_q;
-         q += (long long)gridDim.x * bdim) {
+    // H4: iterate over 3*C(N,4) entries (3 channels per quartet)
+    long long nq_per_ch = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    long long total_g4 = 3 * nq_per_ch;
+    for (long long idx = (long long)blockIdx.x * bdim + tid; idx < total_g4;
+         idx += (long long)gridDim.x * bdim) {
+        // Determine channel and quartet index
+        int ch;
+        long long q;
+        if (idx < nq_per_ch)          { ch = 0; q = idx; }
+        else if (idx < 2 * nq_per_ch) { ch = 1; q = idx - nq_per_ch; }
+        else                          { ch = 2; q = idx - 2 * nq_per_ch; }
+
         int ii, jj, kk, ll;
         ll = 3;
         while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q) ll++;
@@ -358,10 +391,17 @@ __global__ void init_energy_kernel(
         rem -= (long long)jj * (jj - 1) / 2;
         ii = (int)rem;
 
-        cuDoubleComplex gq = g4[q];
-        cuDoubleComplex prod = cuCmul(gq, cuCmul(
-            cuCmul(spins[ii], cuConj(spins[jj])),
-            cuCmul(cuConj(spins[kk]), spins[ll])));
+        cuDoubleComplex gq = g4[idx];
+        cuDoubleComplex ai = spins[ii], aj = spins[jj];
+        cuDoubleComplex ak = spins[kk], al = spins[ll];
+
+        // Channel-dependent conjugation
+        cuDoubleComplex s0, s1, s2, s3;
+        if (ch == 0)      { s0 = ai; s1 = aj;         s2 = cuConj(ak); s3 = cuConj(al); }
+        else if (ch == 1) { s0 = ai; s1 = cuConj(aj); s2 = cuConj(ak); s3 = al; }
+        else              { s0 = ai; s1 = cuConj(aj); s2 = ak;         s3 = cuConj(al); }
+
+        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(s0, s1), cuCmul(s2, s3)));
         local_sum += -cuCreal(prod);
     }
 
@@ -397,10 +437,13 @@ MCState mc_init(const SimConfig& cfg) {
     CUDA_CHECK(cudaMemset(state.d_g2, 0, (long long)N * N * sizeof(cuDoubleComplex)));
 
     long long nq = n_quartets(N);
-    CUDA_CHECK(cudaMalloc(&state.d_g4, nq * sizeof(cuDoubleComplex)));
+    long long nq_tot = n_g4_total(N);  // 3 * C(N,4)
+    CUDA_CHECK(cudaMalloc(&state.d_g4, nq_tot * sizeof(cuDoubleComplex)));
 
     // Generate disorder (same for all replicas, use master seed)
-    generate_g2(state.d_g2, N, cfg.J, cfg.seed + 1000);
+    // With comb frequencies (fmc_mode==1), H2 pairs never survive FMC → skip g2
+    if (cfg.fmc_mode != 1)
+        generate_g2(state.d_g2, N, cfg.J, cfg.seed + 1000);
     generate_g4(state.d_g4, N, cfg.J, cfg.seed + 2000);
 
     // FMC filtering
@@ -419,37 +462,43 @@ MCState mc_init(const SimConfig& cfg) {
         double* d_omega;
         CUDA_CHECK(cudaMalloc(&d_omega, N * sizeof(double)));
         CUDA_CHECK(cudaMemcpy(d_omega, state.h_omega, N * sizeof(double), cudaMemcpyHostToDevice));
-        apply_fmc_g2(state.d_g2, N, d_omega, cfg.gamma);
+
+        // Comb mode: g2 is identically zero, skip both filter and counting
+        if (cfg.fmc_mode == 1) {
+            state.n_pairs_active = 0;
+        } else {
+            apply_fmc_g2(state.d_g2, N, d_omega, cfg.gamma);
+            cuDoubleComplex* h_g2 = new cuDoubleComplex[N * N];
+            CUDA_CHECK(cudaMemcpy(h_g2, state.d_g2, (long long)N * N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+            state.n_pairs_active = 0;
+            for (int i = 0; i < N; i++)
+                for (int j = i + 1; j < N; j++)
+                    if (h_g2[i * N + j].x != 0.0 || h_g2[i * N + j].y != 0.0)
+                        state.n_pairs_active++;
+            delete[] h_g2;
+        }
+
         apply_fmc_g4(state.d_g4, N, d_omega, cfg.gamma);
         CUDA_CHECK(cudaFree(d_omega));
 
-        // Count surviving terms
-        cuDoubleComplex* h_g2 = new cuDoubleComplex[N * N];
-        CUDA_CHECK(cudaMemcpy(h_g2, state.d_g2, (long long)N * N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-        state.n_pairs_active = 0;
-        for (int i = 0; i < N; i++)
-            for (int j = i + 1; j < N; j++)
-                if (h_g2[i * N + j].x != 0.0 || h_g2[i * N + j].y != 0.0)
-                    state.n_pairs_active++;
-        delete[] h_g2;
-
-        long long nq_count = n_quartets(N);
-        cuDoubleComplex* h_g4 = new cuDoubleComplex[nq_count];
-        CUDA_CHECK(cudaMemcpy(h_g4, state.d_g4, nq_count * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+        cuDoubleComplex* h_g4 = new cuDoubleComplex[nq_tot];
+        CUDA_CHECK(cudaMemcpy(h_g4, state.d_g4, nq_tot * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
         state.n_quart_active = 0;
-        for (long long q = 0; q < nq_count; q++)
+        for (long long q = 0; q < nq_tot; q++)
             if (h_g4[q].x != 0.0 || h_g4[q].y != 0.0)
                 state.n_quart_active++;
         delete[] h_g4;
     } else {
         state.h_omega = nullptr;
         state.n_pairs_active = n_pairs(N);
-        state.n_quart_active = n_quartets(N);
+        state.n_quart_active = nq_tot;
     }
 
     // Rescale couplings with Var = J^2 * N / n_surviving
     rescale_g2(state.d_g2, N, cfg.J, state.n_pairs_active);
     rescale_g4(state.d_g4, N, cfg.J, state.n_quart_active);
+
+    state.h2_active = (state.n_pairs_active > 0) ? 1 : 0;
 
     // Allocate per-replica spins
     CUDA_CHECK(cudaMalloc(&state.d_spins, (long long)nrep * N * sizeof(cuDoubleComplex)));
@@ -481,12 +530,13 @@ MCState mc_init(const SimConfig& cfg) {
     CUDA_CHECK(cudaMalloc(&state.d_betas, nrep * sizeof(double)));
 
     // Compute initial energies on GPU
-    long long max_terms = (nq > n_pairs(N)) ? nq : n_pairs(N);
+    long long max_terms = (nq_tot > n_pairs(N)) ? nq_tot : n_pairs(N);
     int e_blocks = (int)((max_terms + 255) / 256);
     if (e_blocks > 1024) e_blocks = 1024;  // cap grid size in x
     dim3 e_grid(e_blocks, nrep);
     init_energy_kernel<<<e_grid, 256, 256 * sizeof(double)>>>(
-        state.d_spins, state.d_g2, state.d_g4, N, nrep, state.d_energies);
+        state.d_spins, state.d_g2, state.d_g4, N, nrep, state.d_energies,
+        state.h2_active);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Print initial energies if verbose (highest-T and lowest-energy only)
@@ -584,7 +634,8 @@ void mc_sweep(MCState& state, const SimConfig& cfg) {
         state.d_spins, state.d_g2, state.d_g4,
         N, nrep, state.d_betas,
         state.d_rng, state.d_energies,
-        state.d_accepted, state.d_proposed);
+        state.d_accepted, state.d_proposed,
+        state.h2_active);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
@@ -617,7 +668,8 @@ void mc_sweep_pt(MCState& state) {
         state.d_spins, state.d_g2, state.d_g4,
         N, nrep, state.d_betas,
         state.d_rng, state.d_energies,
-        state.d_accepted, state.d_proposed);
+        state.d_accepted, state.d_proposed,
+        state.h2_active);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 

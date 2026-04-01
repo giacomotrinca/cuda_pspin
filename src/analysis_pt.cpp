@@ -113,7 +113,7 @@ static std::vector<double> read_frequencies(const char* datadir, int N) {
         fclose(ff);
     } else {
         for (int k = 0; k < N; k++)
-            omega[k] = (N > 1) ? (double)k / (double)(N - 1) : 0.0;
+            omega[k] = (double)k;
     }
     return omega;
 }
@@ -836,6 +836,8 @@ int main(int argc, char** argv) {
                 for (int b = 0; b < nblocks && pos < M; b++) {
                     int bend = pos + bsize;
                     if (bend > M) bend = M;
+                    // Skip truncated remainder blocks (e.g. 1 leftover measurement)
+                    if (bend - pos < bsize) { pos = bend; bsize *= 2; continue; }
                     int sweep_end = all_data[ref][ti].sweeps[bend - 1];
 
                     // Per-sample observables for this block
@@ -926,6 +928,8 @@ int main(int argc, char** argv) {
                     while (pos < M) {
                         int bend = pos + bsize;
                         if (bend > M) bend = M;
+                        // Skip truncated remainder blocks (e.g. 1 leftover measurement)
+                        if (bend - pos < bsize) { pos = bend; bsize *= 2; b++; continue; }
                         int sweep_end = all_data[ref][ti].sweeps[bend - 1];
 
                         // Per-sample: average over replicas
@@ -1216,7 +1220,7 @@ int main(int argc, char** argv) {
             fprintf(fol, "# Parisi overlap distribution P(q)\n");
             fprintf(fol, "# N=%d NT=%d nrep=%d nbins=%d nsamples=%d\n",
                     N, NT, nrep, nbins, nsamples);
-            fprintf(fol, "# q = Re[ (1/(2N)) sum_i a_i^alpha * conj(a_i^beta) ]\n");
+            fprintf(fol, "# q = Re[ (1/N) sum_i a_i^alpha * conj(a_i^beta) ]\n");
             fprintf(fol, "# Columns: q_center  P(q)  Error_jk  Temperature\n");
             fprintf(fol, "# NT blocks separated by blank lines\n");
 

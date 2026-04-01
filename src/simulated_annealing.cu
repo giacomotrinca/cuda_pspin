@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
 
     // GPU memory check
     long long mem_g2    = (long long)cfg.N * cfg.N * sizeof(cuDoubleComplex);
-    long long mem_g4    = n_quartets(cfg.N) * sizeof(cuDoubleComplex);
+    long long mem_g4    = n_g4_total(cfg.N) * sizeof(cuDoubleComplex);
     long long mem_spins = (long long)cfg.nrep * cfg.N * sizeof(cuDoubleComplex);
     long long mem_rng   = (long long)cfg.nrep * 64;
     long long mem_aux   = (long long)cfg.nrep * (sizeof(double) + 2 * sizeof(long long));

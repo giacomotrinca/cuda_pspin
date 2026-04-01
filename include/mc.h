@@ -8,7 +8,7 @@
 struct MCState {
     // Shared disorder (same for all replicas)
     cuDoubleComplex* d_g2;       // device: 2-body couplings [N*N]
-    cuDoubleComplex* d_g4;       // device: 4-body couplings [C(N,4)]
+    cuDoubleComplex* d_g4;       // device: 4-body couplings [3 * C(N,4)]
 
     // Per-replica data (contiguous, indexed by replica)
     cuDoubleComplex* d_spins;    // device: spin configurations [nrep * N]
@@ -21,6 +21,7 @@ struct MCState {
     double* h_omega;             // host: frequencies [N] (NULL if FC)
     long long n_pairs_active;    // active pairs after FMC
     long long n_quart_active;    // active quartets after FMC
+    int h2_active;               // 1 if H2 terms exist, 0 if skipped (comb FMC)
 
     int N;
     int nrep;

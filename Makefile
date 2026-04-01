@@ -7,6 +7,9 @@ CXX     = g++
 # shared library objects (everything except the three main programs)
 LIB_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
 
+# sparse variant: smoothed-cube constraint + sparse H4
+LIB_SPARSE_OBJ = obj/config.o obj/disorder.o obj/mc_sparse.o obj/spins_sparse.o
+
 ifdef visnu
   ARCH = sm_30
 else
@@ -17,7 +20,7 @@ NVFLAGS = -std=c++11 -arch=$(ARCH) -O3 -Iinclude -DNDEBUG
 CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 
-.PHONY: all clean mc sa pt analysis_mc analysis_sa analysis_pt bench bench_plot
+.PHONY: all clean mc sa pt pts analysis_mc analysis_sa analysis_pt bench bench_plot
 
 all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
      bin/analysis bin/analysis_sa bin/analysis_pt
@@ -26,6 +29,7 @@ all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
 mc:           dirs bin/pspin24
 sa:           dirs bin/simulated_annealing
 pt:           dirs bin/parallel_tempering
+pts:          dirs bin/parallel_tempering_sparse
 analysis_mc:  dirs bin/analysis
 analysis_sa:  dirs bin/analysis_sa
 analysis_pt:  dirs bin/analysis_pt
@@ -44,6 +48,9 @@ bin/simulated_annealing: obj/simulated_annealing.o $(LIB_OBJ) | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
 bin/parallel_tempering: obj/parallel_tempering.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/parallel_tempering_sparse: obj/parallel_tempering_sparse.o $(LIB_SPARSE_OBJ) | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
 bin/benchmark: obj/benchmark.o $(LIB_OBJ) | dirs

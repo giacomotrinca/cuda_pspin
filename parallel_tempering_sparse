@@ -1,26 +1,25 @@
 #!/bin/bash
 
-# Launch multiple independent samples of parallel tempering
-# Each sample uses a different seed (= different disorder realisation)
+# Wrapper for sparse parallel tempering (smoothed-cube constraint + sparse H4)
+# Translates --key=value arguments to -key value for the CUDA binary.
 
 # Default parameters
 SIZE=18
-TMAX=1.6
-TMIN=0.05
-NT=30
+TMAX=2.0
+TMIN=0.01
+NT=20
 J=1.0
-ITER=20
+ITER=14
 SEED=$RANDOM
-NREP=16
-PT_FREQ=64
+NREP=2
+PT_FREQ=1
 SAVE_FREQ=64
-NSAMPLES=10
+SHOW_OUTPUT=0
+LABEL=""
 DEV=0
-FMC=2 # 0=FullyConnected, 1=comb, 2=uniform
+FMC=1
 GAMMA=""
-SHOW_OUTPUT=2
 LOG_TEMP=0
-SPARSE=0
 
 # Parse arguments
 for arg in "$@"; do
@@ -35,13 +34,12 @@ for arg in "$@"; do
         --nrep=*)      NREP="${arg#*=}" ;;
         --pt_freq=*)   PT_FREQ="${arg#*=}" ;;
         --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
-        --nsamples=*)  NSAMPLES="${arg#*=}" ;;
+        --label=*)     LABEL="${arg#*=}" ;;
         --dev=*)       DEV="${arg#*=}" ;;
         --fmc=*)       FMC="${arg#*=}" ;;
         --gamma=*)     GAMMA="${arg#*=}" ;;
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
         --log-temp)    LOG_TEMP=1 ;;
-        --sparse)      SPARSE=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N        Number of spins (default: $SIZE)"
@@ -50,17 +48,16 @@ for arg in "$@"; do
             echo "  --nt=N          Number of temperatures (default: $NT)"
             echo "  --J=J           Coupling scale (default: $J)"
             echo "  --iter=K        MC sweeps = 2^K (default: $ITER)"
-            echo "  --seed=S        Initial RNG seed (default: random)"
+            echo "  --seed=S        RNG seed (default: random)"
             echo "  --nrep=R        Independent copies per temperature (default: $NREP)"
             echo "  --pt_freq=P     Propose exchanges every P sweeps (default: $PT_FREQ)"
             echo "  --save_freq=K   Save every K sweeps (default: $SAVE_FREQ)"
-            echo "  --nsamples=S    Number of disorder samples (default: $NSAMPLES)"
+            echo "  --label=L       Sample label (default: none)"
             echo "  --dev=D         GPU device index (default: $DEV)"
             echo "  --fmc=M         FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
             echo "  --gamma=G       FMC gamma (default: auto)"
             echo "  --show-output=L Verbosity: 0=silent 1=compact 2=detailed (default: $SHOW_OUTPUT)"
-            echo "  --log-temp      Geometric temperature schedule: T_k = A*T_{k-1} (default: linear)"
-            echo "  --sparse        Use sparse variant (smoothed cube + sparse H4)"
+            echo "  --log-temp      Geometric temperature schedule (default: linear)"
             exit 0
             ;;
         *)
@@ -70,19 +67,15 @@ for arg in "$@"; do
     esac
 done
 
-SWEEPS=$((1 << ITER))
+# Compute 2^ITER
+MC_ITER=$((1 << ITER))
 TOTAL_REPLICAS=$((NT * NREP))
 
 echo ""
-if [ "$SPARSE" -eq 1 ]; then
 echo "╔══════════════════════════════════════════════════╗"
-echo "║    p-Spin 2+4 :: Scan Samples (Sparse PT)        ║"
+echo "║  p-Spin 2+4 :: Sparse Parallel Tempering        ║"
+echo "║  constraint: sum|a_k|^4 = N  (smoothed cube)    ║"
 echo "╚══════════════════════════════════════════════════╝"
-else
-echo "╔══════════════════════════════════════════════════╗"
-echo "║         p-Spin 2+4 :: Scan Samples (PT)          ║"
-echo "╚══════════════════════════════════════════════════╝"
-fi
 printf "  %-22s %s\n" "N" "$SIZE"
 printf "  %-22s %s\n" "NT" "$NT"
 printf "  %-22s %s\n" "nrep/T" "$NREP"
@@ -90,30 +83,53 @@ printf "  %-22s %s\n" "total replicas" "$TOTAL_REPLICAS"
 printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
 printf "  %-22s %s\n" "J" "$J"
-printf "  %-22s %s  (2^%s)\n" "sweeps" "$SWEEPS" "$ITER"
+printf "  %-22s %s  (2^%s)\n" "sweeps" "$MC_ITER" "$ITER"
 printf "  %-22s %s\n" "pt_freq" "$PT_FREQ"
 printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
-printf "  %-22s %s\n" "samples" "$NSAMPLES"
-printf "  %-22s %s\n" "seed (initial)" "$SEED"
-printf "  %-22s %s\n" "GPU device" "$DEV"
+printf "  %-22s %s\n" "seed" "$SEED"
+if [ -n "$DEV" ]; then printf "  %-22s %s\n" "GPU device" "$DEV"; fi
 if [ -n "$FMC" ]; then printf "  %-22s %s\n" "FMC mode" "$FMC"; fi
+printf "  %-22s %s (= N)\n" "sparse quartets" "$SIZE"
 if [ "$LOG_TEMP" -eq 1 ]; then printf "  %-22s %s\n" "T schedule" "geometric"; else printf "  %-22s %s\n" "T schedule" "linear"; fi
-if [ "$SPARSE" -eq 1 ]; then printf "  %-22s %s\n" "variant" "SPARSE (cube)"; printf "  %-22s %s (= N)\n" "sparse quartets" "$SIZE"; fi
 echo ""
 
-for S in $(seq 0 $((NSAMPLES - 1))); do
-    printf "── Sample %d/%d (seed=%s) " "$S" "$((NSAMPLES - 1))" "$SEED"
-    printf '─%.0s' $(seq 1 28)
-    printf "\n"
-    if [ "$SPARSE" -eq 1 ]; then
-        ./parallel_tempering_sparse --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
-    else
-        ./parallel_tempering --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
-    fi
-    echo ""
-    SEED=$RANDOM
-done
+VERBOSE_FLAG=""
+if [ "$SHOW_OUTPUT" -gt 0 ]; then
+    VERBOSE_FLAG="-verbose $SHOW_OUTPUT"
+fi
 
-echo "── Done ─────────────────────────────────────────────"
-echo "  All $NSAMPLES samples completed."
-echo ""
+LABEL_FLAG=""
+if [ -n "$LABEL" ]; then
+    LABEL_FLAG="-label $LABEL"
+fi
+
+DEV_FLAG=""
+if [ -n "$DEV" ]; then
+    DEV_FLAG="-dev $DEV"
+fi
+
+FMC_FLAG=""
+if [ -n "$FMC" ]; then
+    FMC_FLAG="-fmc $FMC"
+fi
+
+GAMMA_FLAG=""
+if [ -n "$GAMMA" ]; then
+    GAMMA_FLAG="-gamma $GAMMA"
+fi
+
+LOG_TEMP_FLAG=""
+if [ "$LOG_TEMP" -eq 1 ]; then
+    LOG_TEMP_FLAG="-log_temp"
+fi
+
+./bin/parallel_tempering_sparse \
+    -N "$SIZE" \
+    -Tmax "$TMAX" -Tmin "$TMIN" -NT "$NT" \
+    -J "$J" \
+    -iter "$MC_ITER" \
+    -seed "$SEED" \
+    -nrep "$NREP" \
+    -pt_freq "$PT_FREQ" \
+    -save_freq "$SAVE_FREQ" \
+    $VERBOSE_FLAG $LABEL_FLAG $DEV_FLAG $FMC_FLAG $GAMMA_FLAG $LOG_TEMP_FLAG

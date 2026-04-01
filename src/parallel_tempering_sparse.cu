@@ -1,3 +1,13 @@
+// Parallel Tempering — Smoothed Cube constraint + Sparse H4
+//
+// Constraint:  sum_k |a_k|^4 = N   (smoothed cube)
+// H4:          N random quartets sampled from FMC-surviving set
+// H2:          dense storage, FMC-zeroed entries skipped naturally
+//
+// Usage: parallel_tempering_sparse -N n -Tmax t -Tmin t -NT nt -pt_freq p -iter k
+//        [-nrep n] [-J j] [-seed s] [-save_freq f] [-label l] [-dev d]
+//        [-fmc 0|1|2] [-gamma g] [-verbose [0|1|2]] [-log_temp]
+
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -8,7 +18,7 @@
 #include <sys/prctl.h>
 
 #include "config.h"
-#include "mc.h"
+#include "mc_sparse.h"
 #include "disorder.h"
 #include "box.h"
 
@@ -22,16 +32,8 @@
         } \
     } while(0)
 
-// Usage: parallel_tempering -N n -Tmax t -Tmin t -NT nt -pt_freq p -iter k
-//        [-nrep n] [-J j] [-seed s] [-save_freq f] [-label l] [-dev d]
-//        [-fmc 0|1|2] [-gamma g] [-verbose [0|1|2]]
-//
-// NT temperatures (linear schedule), each replicated nrep times.
-// Every pt_freq sweeps, propose NT-1 adjacent replica exchanges.
-// Total GPU replicas = NT * nrep.
-
 int main(int argc, char** argv) {
-    // --- Parse PT-specific args, filter the rest for parse_args ---
+    // --- Parse PT-specific and sparse-specific args ---
     double Tmax = -1.0, Tmin = -1.0;
     int NT = -1, pt_freq = -1;
     int log_temp = 0;
@@ -56,7 +58,7 @@ int main(int argc, char** argv) {
     }
 
     if (Tmax < 0 || Tmin < 0 || NT < 2 || pt_freq < 1) {
-        fprintf(stderr, "Parallel Tempering requires: -Tmax t -Tmin t -NT nt -pt_freq p\n");
+        fprintf(stderr, "Sparse PT requires: -Tmax t -Tmin t -NT nt -pt_freq p\n");
         fprintf(stderr, "Usage: %s -N n -Tmax t -Tmin t -NT nt -pt_freq p -iter k "
                 "[-nrep n] [-J j] [-seed s] [-save_freq f] [-label l] [-dev d] "
                 "[-fmc 0|1|2] [-gamma g] [-verbose [0|1|2]]\n", argv[0]);
@@ -72,20 +74,21 @@ int main(int argc, char** argv) {
     SimConfig cfg = parse_args(new_argc, new_argv);
     delete[] new_argv;
 
-    int nrep_per_temp = cfg.nrep;   // independent copies per temperature
+    int nrep_per_temp = cfg.nrep;
     int total_replicas = NT * nrep_per_temp;
+    int n_sparse = cfg.N;  // always N quartets
 
-    // Override nrep for MCState: manages all replicas
+    // Override nrep for MCStateSparse
     cfg.nrep = total_replicas;
-    cfg.T = Tmax;  // initial T (overridden by per-replica betas)
+    cfg.T = Tmax;
 
     if (cfg.dev >= 0) CUDA_CHECK(cudaSetDevice(cfg.dev));
 
-    // Set process name for top/htop/btop
+    // Process name
     {
         int lbl = (cfg.label >= 0) ? cfg.label : 0;
         char pname[16];
-        snprintf(pname, sizeof(pname), "PT_N%d_NR%d_S%d", cfg.N, nrep_per_temp, lbl);
+        snprintf(pname, sizeof(pname), "PTS_N%d_R%d_S%d", cfg.N, nrep_per_temp, lbl);
         prctl(PR_SET_NAME, pname);
     }
 
@@ -93,14 +96,12 @@ int main(int argc, char** argv) {
     double* T_sched    = new double[NT];
     double* beta_sched = new double[NT];
     if (log_temp) {
-        // Geometric: T_0 = Tmax, T[NT-1] = Tmin, T_k = A * T_{k-1}
         double A = (NT > 1) ? pow(Tmin / Tmax, 1.0 / (NT - 1)) : 1.0;
         for (int t = 0; t < NT; t++) {
             T_sched[t]    = Tmax * pow(A, t);
             beta_sched[t] = 1.0 / T_sched[t];
         }
     } else {
-        // Linear: T_k = Tmax - k * dT
         double dT = (NT > 1) ? (Tmax - Tmin) / (NT - 1) : 0.0;
         for (int t = 0; t < NT; t++) {
             T_sched[t]    = Tmax - t * dT;
@@ -111,12 +112,12 @@ int main(int argc, char** argv) {
     // --- Output directories ---
     int label = (cfg.label >= 0) ? cfg.label : 0;
     char datadir[256];
-    snprintf(datadir, sizeof(datadir), "data/PT_N%d_NT%d_NR%d_S%d",
+    snprintf(datadir, sizeof(datadir), "data/PTS_N%d_NT%d_NR%d_S%d",
              cfg.N, NT, nrep_per_temp, label);
     mkdir("data", 0755);
     mkdir(datadir, 0755);
 
-    // --- Open output files ---
+    // --- Output files ---
     char efile[256], xfile[256];
     snprintf(efile, sizeof(efile), "%s/energy_accept.txt", datadir);
     snprintf(xfile, sizeof(xfile), "%s/exchanges.txt", datadir);
@@ -125,12 +126,11 @@ int main(int argc, char** argv) {
     FILE* fex  = fopen(xfile, "w");
     if (!fout || !fex) { fprintf(stderr, "Cannot open output files\n"); return 2; }
 
-    // Configs: single binary file (header + appended snapshots)
+    // Configs binary file
     char confbin[256];
     snprintf(confbin, sizeof(confbin), "%s/configs.bin", datadir);
     FILE* fconf = fopen(confbin, "wb");
     if (!fconf) { fprintf(stderr, "Cannot open configs.bin\n"); return 2; }
-    // Header: N, NT, nrep_per_temp
     {
         int hdr[3] = { cfg.N, NT, nrep_per_temp };
         fwrite(hdr, sizeof(int), 3, fconf);
@@ -141,40 +141,42 @@ int main(int argc, char** argv) {
     for (int r = 0; r < nrep_per_temp; r++)
         fprintf(fout, "\tE%d/N\tacc%d", r, r);
     fprintf(fout, "\n");
-
     fprintf(fex, "# sweep\tTidx\tT_high\tT_low\tn_acc\tn_prop\trate\n");
 
-    // --- GPU memory check ---
-    long long mem_g2    = (long long)cfg.N * cfg.N * sizeof(cuDoubleComplex);
-    long long mem_g4    = n_g4_total(cfg.N) * sizeof(cuDoubleComplex);
-    long long mem_spins = (long long)total_replicas * cfg.N * sizeof(cuDoubleComplex);
-    long long mem_rng   = (long long)total_replicas * 64;
-    long long mem_aux   = (long long)total_replicas * (sizeof(double) * 2 + 2 * sizeof(long long));
-    long long mem_total = mem_g2 + mem_g4 + mem_spins + mem_rng + mem_aux;
+    // --- GPU memory check (peak = during init with temporary dense g4) ---
+    long long mem_g2       = (long long)cfg.N * cfg.N * sizeof(cuDoubleComplex);
+    long long mem_g4_tmp   = n_g4_total(cfg.N) * sizeof(cuDoubleComplex);
+    long long mem_sparse   = (long long)n_sparse * sizeof(SparseQuartet);
+    long long mem_spins    = (long long)total_replicas * cfg.N * sizeof(cuDoubleComplex);
+    long long mem_rng      = (long long)total_replicas * 64;
+    long long mem_aux      = (long long)total_replicas * (sizeof(double) * 2 + 2 * sizeof(long long));
+    long long mem_peak     = mem_g2 + mem_g4_tmp + mem_spins + mem_rng + mem_aux + mem_sparse;
+    long long mem_runtime  = mem_g2 + mem_sparse + mem_spins + mem_rng + mem_aux;
 
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-    if (mem_total > (long long)free_mem * 0.9) {
-        fprintf(stderr, "ERROR: Not enough GPU memory! Need %.1fMB, have %.1fMB free\n",
-                mem_total / 1e6, free_mem / 1e6);
+    if (mem_peak > (long long)free_mem * 0.9) {
+        fprintf(stderr, "ERROR: Not enough GPU memory! Peak %.1fMB, have %.1fMB free\n",
+                mem_peak / 1e6, free_mem / 1e6);
         return 1;
     }
 
-    // Print header
+    // --- Print header ---
     printf("\n");
     box_top();
-    box_title("         p-Spin 2+4 :: Parallel Tempering         ");
+    box_title("    p-Spin 2+4 :: Sparse Parallel Tempering       ");
     box_bot();
     if (cfg.verbose >= 1) {
         cudaDeviceProp prop;
         CUDA_CHECK(cudaGetDeviceProperties(&prop, cfg.dev >= 0 ? cfg.dev : 0));
         printf("  %-22s %s (compute %d.%d)\n", "GPU", prop.name, prop.major, prop.minor);
-        printf("  %-22s %d\n", "N", cfg.N);
-        printf("  %-22s %d\n", "NT", NT);
-        printf("  %-22s %d\n", "nrep/T", nrep_per_temp);
-        printf("  %-22s %d\n", "total replicas", total_replicas);
-        printf("  %-22s %.6f\n", "Tmax", Tmax);
-        printf("  %-22s %.6f\n", "Tmin", Tmin);
+        printf("  %-22s %d\n",    "N", cfg.N);
+        printf("  %-22s smoothed cube (sum|a|^4 = N)\n", "constraint");
+        printf("  %-22s %d\n",    "NT", NT);
+        printf("  %-22s %d\n",    "nrep/T", nrep_per_temp);
+        printf("  %-22s %d\n",    "total replicas", total_replicas);
+        printf("  %-22s %.6f\n",  "Tmax", Tmax);
+        printf("  %-22s %.6f\n",  "Tmin", Tmin);
         if (log_temp) {
             double A = (NT > 1) ? pow(Tmin / Tmax, 1.0 / (NT - 1)) : 1.0;
             printf("  %-22s geometric (A=%.8f)\n", "T schedule", A);
@@ -182,34 +184,36 @@ int main(int argc, char** argv) {
             double dT = (NT > 1) ? (Tmax - Tmin) / (NT - 1) : 0.0;
             printf("  %-22s linear (dT=%.8f)\n", "T schedule", dT);
         }
-        printf("  %-22s %d\n", "MC sweeps", cfg.mc_iterations);
-        printf("  %-22s %d\n", "pt_freq", pt_freq);
-        printf("  %-22s %d\n", "save_freq", cfg.save_freq);
-        printf("  %-22s %llu\n", "seed", (unsigned long long)cfg.seed);
-        printf("  %-22s %.4f\n", "J", cfg.J);
+        printf("  %-22s %d\n",    "MC sweeps", cfg.mc_iterations);
+        printf("  %-22s %d\n",    "pt_freq", pt_freq);
+        printf("  %-22s %d\n",    "save_freq", cfg.save_freq);
+        printf("  %-22s %llu\n",  "seed", (unsigned long long)cfg.seed);
+        printf("  %-22s %.4f\n",  "J", cfg.J);
+        printf("  %-22s %d (= N)\n", "sparse H4 quartets", n_sparse);
         if (cfg.fmc_mode > 0) {
             const char* fmc_names[] = {"FC", "comb", "uniform"};
             printf("  %-22s %s (gamma=%.6f)\n", "FMC", fmc_names[cfg.fmc_mode], cfg.gamma);
         }
-        printf("  %-22s %lld\n", "pairs", n_pairs(cfg.N));
-        printf("  %-22s %lld\n", "quartets", n_quartets(cfg.N));
-        printf("  %-22s %.1f MB (%.0f MB free / %.0f MB)\n", "memory",
-               mem_total/1e6, free_mem/1e6, total_mem/1e6);
+        printf("  %-22s %lld\n",  "pairs", n_pairs(cfg.N));
+        printf("  %-22s %lld\n",  "quartets (dense)", n_quartets(cfg.N));
+        printf("  %-22s peak %.1f MB, runtime %.1f MB (%.0f MB free)\n",
+               "memory", mem_peak / 1e6, mem_runtime / 1e6, free_mem / 1e6);
         printf("\n");
         printf("  %-22s %d temperatures in [%.6f, %.6f]\n\n",
                "schedule", NT, T_sched[NT - 1], T_sched[0]);
     }
 
-    // --- Initialize MCState (all replicas, shared disorder) ---
-    MCState state = mc_init(cfg);
+    // --- Initialize MCStateSparse ---
+    MCStateSparse state = mc_sparse_init(cfg);
 
     // FMC stats and frequency file
     if (cfg.fmc_mode > 0) {
         const char* fmc_names[] = {"FC", "comb", "uniform"};
-        printf("  %-22s %s (gamma=%.6f)  pairs=%lld/%lld  quartets=%lld/%lld\n",
-               "FMC active", fmc_names[cfg.fmc_mode], cfg.gamma,
-               state.n_pairs_active, n_pairs(cfg.N),
-               state.n_quart_active, n_quartets(cfg.N));
+        printf("  %-22s %s (gamma=%.6f)\n", "FMC active", fmc_names[cfg.fmc_mode], cfg.gamma);
+        printf("  %-22s %lld/%lld\n", "pairs surviving", state.n_pairs_active, n_pairs(cfg.N));
+        printf("  %-22s %lld/%lld\n", "quartets surviving", state.n_quart_active, n_g4_total(cfg.N));
+        printf("  %-22s %d (sampled from survivors)\n", "sparse H4 selected", state.n_quartets);
+
         char freqfile[256];
         snprintf(freqfile, sizeof(freqfile), "%s/frequencies.txt", datadir);
         FILE* ff = fopen(freqfile, "w");
@@ -234,34 +238,51 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Save sparse quartet list (for analysis reproducibility)
+    {
+        SparseQuartet* h_sq = new SparseQuartet[state.n_quartets];
+        CUDA_CHECK(cudaMemcpy(h_sq, state.d_quartets,
+                              state.n_quartets * sizeof(SparseQuartet),
+                              cudaMemcpyDeviceToHost));
+        char sqfile[256];
+        snprintf(sqfile, sizeof(sqfile), "%s/quartets.txt", datadir);
+        FILE* fsq = fopen(sqfile, "w");
+        if (fsq) {
+            fprintf(fsq, "# idx i j k l ch Re(g)\n");
+            for (int s = 0; s < state.n_quartets; s++)
+                fprintf(fsq, "%d\t%d\t%d\t%d\t%d\t%d\t%.12e\n",
+                        s, h_sq[s].i, h_sq[s].j, h_sq[s].k, h_sq[s].l,
+                        h_sq[s].ch, cuCreal(h_sq[s].g));
+            fclose(fsq);
+        }
+        delete[] h_sq;
+    }
+
     // --- Set initial per-replica betas ---
     double* h_betas = new double[total_replicas];
     for (int t = 0; t < NT; t++)
         for (int r = 0; r < nrep_per_temp; r++)
             h_betas[t * nrep_per_temp + r] = beta_sched[t];
-    mc_set_betas(state, h_betas);
+    mc_sparse_set_betas(state, h_betas);
 
-    // --- Permutation: perm[logical_idx] = physical replica index ---
-    // logical_idx = t * nrep_per_temp + r
-    // Initially: identity mapping
+    // --- Permutation: perm[logical] = physical replica ---
     int* perm = new int[total_replicas];
     for (int i = 0; i < total_replicas; i++) perm[i] = i;
 
     // --- Host buffers ---
-    double* h_energies     = new double[total_replicas];
-    long long* h_accepted  = new long long[total_replicas];
-    long long* h_proposed  = new long long[total_replicas];
-    long long spin_count   = (long long)total_replicas * cfg.N;
+    double*    h_energies = new double[total_replicas];
+    long long* h_accepted = new long long[total_replicas];
+    long long* h_proposed = new long long[total_replicas];
+    long long  spin_count = (long long)total_replicas * cfg.N;
     cuDoubleComplex* h_spins = new cuDoubleComplex[spin_count];
-    double* h_re_im = new double[2 * cfg.N];
+    double*    h_re_im = new double[2 * cfg.N];
 
-    // Exchange counters (cumulative and per-save window)
+    // Exchange counters
     long long* ex_acc_total  = new long long[NT - 1]();
     long long* ex_prop_total = new long long[NT - 1]();
     long long* ex_acc_win    = new long long[NT - 1]();
     long long* ex_prop_win   = new long long[NT - 1]();
 
-    // Reproducible RNG for exchange acceptance
     srand48((long)cfg.seed + 5000);
 
     struct timespec t_start, t_end;
@@ -269,22 +290,19 @@ int main(int argc, char** argv) {
 
     if (cfg.verbose >= 1) box_sec("Running");
 
-    // Main MC loop
+    // ===================== Main MC loop =====================
     for (int s = 0; s < cfg.mc_iterations; s++) {
-        mc_sweep_pt(state);
+        mc_sparse_sweep_pt(state);
 
         // --- Replica exchange ---
         if ((s + 1) % pt_freq == 0) {
-            mc_get_results(state, h_energies, h_accepted, h_proposed);
+            mc_sparse_get_results(state, h_energies, h_accepted, h_proposed);
 
-            // Sweep from highest T (t=0) to lowest-1 (t=NT-2)
             for (int t = 0; t < NT - 1; t++) {
                 for (int r = 0; r < nrep_per_temp; r++) {
-                    int phys_a = perm[t       * nrep_per_temp + r]; // at T_t (higher T)
-                    int phys_b = perm[(t + 1) * nrep_per_temp + r]; // at T_{t+1} (lower T)
+                    int phys_a = perm[t       * nrep_per_temp + r];
+                    int phys_b = perm[(t + 1) * nrep_per_temp + r];
 
-                    // Delta = (beta_t - beta_{t+1})(E_a - E_b)
-                    // beta_t < beta_{t+1}, so beta_t - beta_{t+1} < 0
                     double delta = (beta_sched[t] - beta_sched[t + 1])
                                  * (h_energies[phys_a] - h_energies[phys_b]);
 
@@ -297,7 +315,6 @@ int main(int argc, char** argv) {
                     if (accept) {
                         ex_acc_total[t]++;
                         ex_acc_win[t]++;
-                        // Swap permutation entries
                         int tmp = perm[t * nrep_per_temp + r];
                         perm[t * nrep_per_temp + r] = perm[(t + 1) * nrep_per_temp + r];
                         perm[(t + 1) * nrep_per_temp + r] = tmp;
@@ -305,18 +322,17 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Rebuild betas from current permutation
+            // Rebuild betas from permutation
             for (int t = 0; t < NT; t++)
                 for (int r = 0; r < nrep_per_temp; r++)
                     h_betas[perm[t * nrep_per_temp + r]] = beta_sched[t];
-            mc_set_betas(state, h_betas);
+            mc_sparse_set_betas(state, h_betas);
         }
 
         // --- Save data ---
         if ((s + 1) % cfg.save_freq == 0 || s == cfg.mc_iterations - 1) {
-            mc_get_results(state, h_energies, h_accepted, h_proposed);
+            mc_sparse_get_results(state, h_energies, h_accepted, h_proposed);
 
-            // Energy & acceptance per temperature
             for (int t = 0; t < NT; t++) {
                 fprintf(fout, "%d\t%d\t%.8f", s + 1, t, T_sched[t]);
                 for (int r = 0; r < nrep_per_temp; r++) {
@@ -329,14 +345,13 @@ int main(int argc, char** argv) {
             }
             fflush(fout);
 
-            // Exchange rates (window since last save)
             for (int t = 0; t < NT - 1; t++) {
                 double rate = (ex_prop_win[t] > 0)
                     ? (double)ex_acc_win[t] / ex_prop_win[t] : 0.0;
                 fprintf(fex, "%d\t%d\t%.8f\t%.8f\t%lld\t%lld\t%.5f\n",
                         s + 1, t, T_sched[t], T_sched[t + 1],
                         ex_acc_win[t], ex_prop_win[t], rate);
-                ex_acc_win[t] = 0;
+                ex_acc_win[t]  = 0;
                 ex_prop_win[t] = 0;
             }
             fflush(fex);
@@ -345,9 +360,9 @@ int main(int argc, char** argv) {
             CUDA_CHECK(cudaMemset(state.d_accepted, 0, total_replicas * sizeof(long long)));
             CUDA_CHECK(cudaMemset(state.d_proposed, 0, total_replicas * sizeof(long long)));
 
-            // Save spin configurations only in second half of simulation
+            // Save spin configs in second half
             if (s >= cfg.mc_iterations / 2) {
-                mc_get_spins(state, h_spins);
+                mc_sparse_get_spins(state, h_spins);
                 int sweep = s + 1;
                 fwrite(&sweep, sizeof(int), 1, fconf);
                 for (int t = 0; t < NT; t++) {
@@ -366,11 +381,7 @@ int main(int argc, char** argv) {
 
             // Verbose output
             if (cfg.verbose >= 2) {
-                // Row format: sweep  E/N[NT-1]  ex[NT-1]  E/N[NT/2]  ex[NT/2]  E/N[0]  ex[0]
-                int t_cold = NT - 1;
-                int t_mid  = NT / 2;
-                int t_hot  = 0;
-
+                int t_cold = NT - 1, t_mid = NT / 2, t_hot = 0;
                 int phys_cold = perm[t_cold * nrep_per_temp];
                 int phys_mid  = perm[t_mid  * nrep_per_temp];
                 int phys_hot  = perm[t_hot  * nrep_per_temp];
@@ -388,7 +399,6 @@ int main(int argc, char** argv) {
                        t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,
                        t_hot,  h_energies[phys_hot]  / cfg.N, ex_hot);
             } else if (cfg.verbose == 1) {
-                // Compact: one line with energy at coldest T
                 int phys_cold = perm[(NT - 1) * nrep_per_temp];
                 int phys_hot  = perm[0];
                 printf("  sweep %d/%d:  E_hot/N=% .3e  E_cold/N=% .3e\n",
@@ -405,10 +415,12 @@ int main(int argc, char** argv) {
 
     // Final summary
     printf("\n"); box_sec("Summary");
-    printf("  %-22s %.3f s\n", "total time", elapsed);
-    printf("  %-22s %.4f ms\n", "time/sweep", elapsed / cfg.mc_iterations * 1e3);
-    printf("  %-22s %d\n", "sweeps", cfg.mc_iterations);
-    printf("  %-22s %d\n", "total replicas", total_replicas);
+    printf("  %-22s %.3f s\n",    "total time", elapsed);
+    printf("  %-22s %.4f ms\n",   "time/sweep", elapsed / cfg.mc_iterations * 1e3);
+    printf("  %-22s %d\n",        "sweeps", cfg.mc_iterations);
+    printf("  %-22s %d\n",        "total replicas", total_replicas);
+    printf("  %-22s %d\n",        "sparse H4 quartets", state.n_quartets);
+    printf("  %-22s smoothed cube\n", "constraint");
     printf("\n"); box_sec("Exchange Rates");
     for (int t = 0; t < NT - 1; t++) {
         double rate = (ex_prop_total[t] > 0)
@@ -424,11 +436,13 @@ int main(int argc, char** argv) {
     snprintf(timefile, sizeof(timefile), "%s/time.txt", datadir);
     FILE* ftim = fopen(timefile, "w");
     if (ftim) {
-        fprintf(ftim, "# N NT nrep_per_temp total_replicas mc_iterations pt_freq save_freq Tmax Tmin total_time_s ms_per_sweep\n");
-        fprintf(ftim, "%d %d %d %d %d %d %d %.6f %.6f %.6f %.6f\n",
+        fprintf(ftim, "# N NT nrep_per_temp total_replicas mc_iterations pt_freq "
+                "save_freq Tmax Tmin n_sparse total_time_s ms_per_sweep\n");
+        fprintf(ftim, "%d %d %d %d %d %d %d %.6f %.6f %d %.6f %.6f\n",
                 cfg.N, NT, nrep_per_temp, total_replicas,
                 cfg.mc_iterations, pt_freq, cfg.save_freq,
-                Tmax, Tmin, elapsed, elapsed / cfg.mc_iterations * 1e3);
+                Tmax, Tmin, state.n_quartets,
+                elapsed, elapsed / cfg.mc_iterations * 1e3);
         fclose(ftim);
     }
 
@@ -449,6 +463,6 @@ int main(int argc, char** argv) {
     delete[] ex_prop_total;
     delete[] ex_acc_win;
     delete[] ex_prop_win;
-    mc_free(state);
+    mc_sparse_free(state);
     return 0;
 }

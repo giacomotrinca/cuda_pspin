@@ -2,8 +2,8 @@
 
 # Launcher for PT analysis binary (bin/analysis_pt)
 
-SIZE=18
-NT=36
+SIZE=24
+NT=20
 NREP=4
 NBINS=80
 NTHREADS=$(nproc)

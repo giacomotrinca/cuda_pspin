@@ -56,51 +56,57 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
     if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
 }
 
-// Kernel: compute H4 partial sums
-// H4 = -sum_{i<j<k<l} Re[ g4_ijkl * a_i * conj(a_j) * conj(a_k) * a_l ]
+// Kernel: compute H4 partial sums over 3*C(N,4) entries (3 channels)
+// Channel-dependent conjugation:
+//   ch 0: -Re[g4 * a_ii * a_jj * conj(a_kk) * conj(a_ll)]
+//   ch 1: -Re[g4 * a_ii * conj(a_jj) * conj(a_kk) * a_ll]
+//   ch 2: -Re[g4 * a_ii * conj(a_jj) * a_kk * conj(a_ll)]
 __global__ void energy_h4_kernel(const cuDoubleComplex* spins,
                                   const cuDoubleComplex* g4,
                                   int N, double* partial_sums) {
     extern __shared__ double sdata[];
     int tid = threadIdx.x;
-    long long q_idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
 
-    long long total_quartets = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    long long nq_per_ch = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    long long nq_total = 3 * nq_per_ch;
     double local_sum = 0.0;
 
-    if (q_idx < total_quartets) {
-        // Map linear index to (i,j,k,l) with i<j<k<l
-        // Decode using combinatorial number system
+    if (idx < nq_total) {
+        // Determine channel and quartet index
+        int ch;
+        long long q;
+        if (idx < nq_per_ch)          { ch = 0; q = idx; }
+        else if (idx < 2 * nq_per_ch) { ch = 1; q = idx - nq_per_ch; }
+        else                          { ch = 2; q = idx - 2 * nq_per_ch; }
+
+        // Decode combinatorial index
         int ii, jj, kk, ll;
-
-        // Find ll: largest such that C(ll,4) <= q_idx
         ll = 3;
-        while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q_idx) ll++;
+        while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q) ll++;
         ll--;
-        long long rem = q_idx - (long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24;
-
-        // Find kk: largest such that C(kk,3) <= rem
+        long long rem = q - (long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24;
         kk = 2;
         while ((long long)kk * (kk - 1) * (kk - 2) / 6 <= rem) kk++;
         kk--;
         rem -= (long long)kk * (kk - 1) * (kk - 2) / 6;
-
-        // Find jj: largest such that C(jj,2) <= rem
         jj = 1;
         while ((long long)jj * (jj - 1) / 2 <= rem) jj++;
         jj--;
         rem -= (long long)jj * (jj - 1) / 2;
-
         ii = (int)rem;
 
-        cuDoubleComplex gq = g4[q_idx];
-        cuDoubleComplex ai = spins[ii];
-        cuDoubleComplex aj_conj = cuConj(spins[jj]);
-        cuDoubleComplex ak_conj = cuConj(spins[kk]);
-        cuDoubleComplex al = spins[ll];
+        cuDoubleComplex gq = g4[idx];
+        cuDoubleComplex ai = spins[ii], aj = spins[jj];
+        cuDoubleComplex ak = spins[kk], al = spins[ll];
 
-        // g4 * a_i * conj(a_j) * conj(a_k) * a_l  (positions 1,2 conjugated)
-        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(ai, aj_conj), cuCmul(ak_conj, al)));
+        // Apply channel-dependent conjugation
+        cuDoubleComplex s0, s1, s2, s3;
+        if (ch == 0)      { s0 = ai; s1 = aj;           s2 = cuConj(ak); s3 = cuConj(al); }
+        else if (ch == 1) { s0 = ai; s1 = cuConj(aj);   s2 = cuConj(ak); s3 = al; }
+        else              { s0 = ai; s1 = cuConj(aj);   s2 = ak;         s3 = cuConj(al); }
+
+        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(s0, s1), cuCmul(s2, s3)));
         local_sum = -cuCreal(prod);
     }
 
@@ -172,8 +178,8 @@ double compute_energy(const cuDoubleComplex* d_spins,
     // H4 contribution
     {
         int bs = optimal_bs_h4();
-        long long nq = n_quartets(N);
-        int n_blocks = (int)((nq + bs - 1) / bs);
+        long long ntot = n_g4_total(N);  // 3 * C(N,4)
+        int n_blocks = (int)((ntot + bs - 1) / bs);
         double* d_partial;
         CUDA_CHECK(cudaMalloc(&d_partial, n_blocks * sizeof(double)));
 
@@ -257,7 +263,7 @@ __global__ void delta_e_h2_kernel(
 }
 
 // Kernel: compute delta_E from 4-body terms involving sites i0 or j0
-// This iterates over ALL quadruplets that contain i0 or j0 (or both).
+// Iterates over 3*C(N,4) entries (3 channels per quartet).
 __global__ void delta_e_h4_kernel(
     const cuDoubleComplex* spins,
     const cuDoubleComplex* g4,
@@ -267,54 +273,61 @@ __global__ void delta_e_h4_kernel(
 ) {
     extern __shared__ double sdata[];
     int tid = threadIdx.x;
-    long long q_idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
 
-    long long total_quartets = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    long long nq_per_ch = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    long long nq_total = 3 * nq_per_ch;
     double local_dE = 0.0;
 
-    if (q_idx < total_quartets) {
-        // Decode quadruplet index to (ii, jj, kk, ll) with ii < jj < kk < ll
+    if (idx < nq_total) {
+        int ch;
+        long long q;
+        if (idx < nq_per_ch)          { ch = 0; q = idx; }
+        else if (idx < 2 * nq_per_ch) { ch = 1; q = idx - nq_per_ch; }
+        else                          { ch = 2; q = idx - 2 * nq_per_ch; }
+
+        // Decode
         int ii, jj, kk, ll;
-
         ll = 3;
-        while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q_idx) ll++;
+        while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q) ll++;
         ll--;
-        long long rem = q_idx - (long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24;
-
+        long long rem = q - (long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24;
         kk = 2;
         while ((long long)kk * (kk - 1) * (kk - 2) / 6 <= rem) kk++;
         kk--;
         rem -= (long long)kk * (kk - 1) * (kk - 2) / 6;
-
         jj = 1;
         while ((long long)jj * (jj - 1) / 2 <= rem) jj++;
         jj--;
         rem -= (long long)jj * (jj - 1) / 2;
-
         ii = (int)rem;
 
-        // Check if this quadruplet involves i0 or j0
         bool involves = (ii == i0 || jj == i0 || kk == i0 || ll == i0 ||
                          ii == j0 || jj == j0 || kk == j0 || ll == j0);
 
         if (involves) {
-            cuDoubleComplex gq = g4[q_idx];
+            cuDoubleComplex gq = g4[idx];
 
-            // Old contribution: positions 0,3 unconjugated; 1,2 conjugated
-            cuDoubleComplex oi = spins[ii], oj_c = cuConj(spins[jj]);
-            cuDoubleComplex ok_c = cuConj(spins[kk]), ol = spins[ll];
-            cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(oi, oj_c), cuCmul(ok_c, ol)));
+            // Conjugation mask: bit p set → position p conjugated
+            // ch 0: conj {kk,ll}  mask=0xC, ch 1: conj {jj,kk} mask=0x6, ch 2: conj {jj,ll} mask=0xA
+            int cm = (ch == 0) ? 0xC : ((ch == 1) ? 0x6 : 0xA);
+            int ids[4] = {ii, jj, kk, ll};
 
-            // New contribution: replace spins i0 and j0 with new values
-            cuDoubleComplex ni = (ii == i0) ? a_i_new : ((ii == j0) ? a_j_new : spins[ii]);
-            cuDoubleComplex nj = (jj == i0) ? a_i_new : ((jj == j0) ? a_j_new : spins[jj]);
-            cuDoubleComplex nk = (kk == i0) ? a_i_new : ((kk == j0) ? a_j_new : spins[kk]);
-            cuDoubleComplex nl = (ll == i0) ? a_i_new : ((ll == j0) ? a_j_new : spins[ll]);
-            nj = cuConj(nj);  // positions 1,2 conjugated
-            nk = cuConj(nk);
+            cuDoubleComplex old_f[4], new_f[4];
+            for (int p = 0; p < 4; p++) {
+                cuDoubleComplex oval = spins[ids[p]];
+                cuDoubleComplex nval;
+                if (ids[p] == i0)      nval = a_i_new;
+                else if (ids[p] == j0) nval = a_j_new;
+                else                   nval = oval;
+                old_f[p] = ((cm >> p) & 1) ? cuConj(oval) : oval;
+                new_f[p] = ((cm >> p) & 1) ? cuConj(nval) : nval;
+            }
 
-            cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(ni, nj), cuCmul(nk, nl)));
-
+            cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(old_f[0], old_f[1]),
+                                                         cuCmul(old_f[2], old_f[3])));
+            cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(new_f[0], new_f[1]),
+                                                         cuCmul(new_f[2], new_f[3])));
             local_dE = -(cuCreal(new_prod) - cuCreal(old_prod));
         }
     }
@@ -371,8 +384,8 @@ double compute_delta_E_pair(
     // H4 delta
     {
         int bs = optimal_bs_dh4();
-        long long nq = n_quartets(N);
-        int n_blocks = (int)((nq + bs - 1) / bs);
+        long long ntot = n_g4_total(N);  // 3 * C(N,4)
+        int n_blocks = (int)((ntot + bs - 1) / bs);
 
         // Reuse workspace (ensure it's large enough)
         delta_e_h4_kernel<<<n_blocks, bs, bs * sizeof(double)>>>(
