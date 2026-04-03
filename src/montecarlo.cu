@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
 
     // Memory estimate (all GPU allocations)
     long long mem_g2    = (long long)cfg.N * cfg.N * sizeof(cuDoubleComplex);
-    long long mem_g4    = n_g4_total(cfg.N) * sizeof(cuDoubleComplex);
+    long long mem_g4    = n_quartets(cfg.N) * (sizeof(cuDoubleComplex) + sizeof(uint8_t));
     long long mem_spins = (long long)cfg.nrep * cfg.N * sizeof(cuDoubleComplex);
     long long mem_rng   = (long long)cfg.nrep * 64;  // curandStatePhilox4_32_10_t = 64B
     long long mem_aux   = (long long)cfg.nrep * (sizeof(double) + 2 * sizeof(long long));
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
         printf("  %-22s %s (gamma=%.4f)  pairs=%lld/%lld  quartets=%lld/%lld\n",
                "FMC active", fmc_names[cfg.fmc_mode], cfg.gamma,
                state.n_pairs_active, n_pairs(cfg.N),
-               state.n_quart_active, n_quartets(cfg.N));
+               state.n_quart_active, n_g4_total(cfg.N));
         char freqfile[256];
         snprintf(freqfile, sizeof(freqfile), "%s/frequencies.txt", datadir);
         FILE* ff = fopen(freqfile, "w");

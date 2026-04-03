@@ -8,7 +8,10 @@ SIZE=18
 TMAX=2.0
 TMIN=0.001
 NTEMP=20
-J=1.0
+J=2.0
+J0=0.0
+ALPHA=0.5
+ALPHA0=0.5
 ITER=13
 SEED=$RANDOM
 NREP=4
@@ -18,6 +21,7 @@ DEV=0
 FMC=1
 GAMMA=""
 SHOW_OUTPUT=1
+COMPRESS=0
 
 # Parse arguments
 for arg in "$@"; do
@@ -27,6 +31,9 @@ for arg in "$@"; do
         --tmin=*)      TMIN="${arg#*=}" ;;
         --ntemp=*)     NTEMP="${arg#*=}" ;;
         --J=*)         J="${arg#*=}" ;;
+        --J0=*)        J0="${arg#*=}" ;;
+        --alpha=*)     ALPHA="${arg#*=}" ;;
+        --alpha0=*)    ALPHA0="${arg#*=}" ;;
         --iter=*)      ITER="${arg#*=}" ;;
         --seed=*)      SEED="${arg#*=}" ;;
         --nrep=*)      NREP="${arg#*=}" ;;
@@ -36,6 +43,7 @@ for arg in "$@"; do
         --fmc=*)       FMC="${arg#*=}" ;;
         --gamma=*)     GAMMA="${arg#*=}" ;;
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
+        --compress)    COMPRESS=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N       Number of spins (default: $SIZE)"
@@ -43,6 +51,9 @@ for arg in "$@"; do
             echo "  --tmin=T       Min temperature (default: $TMIN)"
             echo "  --ntemp=N      Number of temperature steps (default: $NTEMP)"
             echo "  --J=J          Coupling scale (default: $J)"
+            echo "  --J0=J0        Mean coupling scale (default: $J0)"
+            echo "  --alpha=A      4-body fraction of J (default: $ALPHA)"
+            echo "  --alpha0=A0    4-body fraction of J0 (default: $ALPHA0)"
             echo "  --iter=K       Sweeps per temp = 2^K (default: $ITER)"
             echo "  --seed=S       Initial RNG seed (default: random)"
             echo "  --nrep=R       Number of replicas (default: $NREP)"
@@ -52,6 +63,7 @@ for arg in "$@"; do
             echo "  --fmc=M        FMC mode: 0=FC, 1=comb, 2=uniform (default: $FMC)"
             echo "  --gamma=G      FMC gamma (default: auto)"
             echo "  --show-output=L Print progress: 0=silent 1=temp 2=sweeps (default: $SHOW_OUTPUT)"
+            echo "  --compress      Compress data files with xz -9 after each sample"
             exit 0
             ;;
         *)
@@ -73,19 +85,32 @@ printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
 printf "  %-22s %s\n" "ntemp" "$NTEMP"
 printf "  %-22s %s\n" "J" "$J"
+printf "  %-22s %s\n" "J0" "$J0"
+printf "  %-22s %s\n" "alpha" "$ALPHA"
+printf "  %-22s %s\n" "alpha0" "$ALPHA0"
 printf "  %-22s %s  (2^%s)\n" "sweeps/temp" "$SWEEPS" "$ITER"
 printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
 printf "  %-22s %s\n" "samples" "$NSAMPLES"
 printf "  %-22s %s\n" "seed (initial)" "$SEED"
 printf "  %-22s %s\n" "GPU device" "$DEV"
 if [ -n "$FMC" ]; then printf "  %-22s %s\n" "FMC mode" "$FMC"; fi
+if [ "$COMPRESS" -eq 1 ]; then printf "  %-22s %s\n" "compress" "xz -9"; fi
 echo ""
 
 for S in $(seq 0 $((NSAMPLES - 1))); do
     printf "── Sample %d/%d (seed=%s) " "$S" "$((NSAMPLES - 1))" "$SEED"
     printf '─%.0s' $(seq 1 28)
     printf "\n"
-    ./simulated_annealing --size=$SIZE --tmax=$TMAX --tmin=$TMIN --ntemp=$NTEMP --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT
+    ./simulated_annealing --size=$SIZE --tmax=$TMAX --tmin=$TMIN --ntemp=$NTEMP --J=$J --J0=$J0 --alpha=$ALPHA --alpha0=$ALPHA0 --iter=$ITER --seed=$SEED --nrep=$NREP --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT
+    # Compress data if requested
+    if [ "$COMPRESS" -eq 1 ]; then
+        DATADIR="data/SA_N${SIZE}_NR${NREP}_S${S}"
+        if [ -d "$DATADIR" ]; then
+            echo "  Compressing $DATADIR ..."
+            find "$DATADIR" \( -name '*.bin' -o -name '*.txt' \) ! -name '*.xz' -exec xz -9 {} +
+            echo "  Done."
+        fi
+    fi
     echo ""
     SEED=$((SEED + 1))
 done

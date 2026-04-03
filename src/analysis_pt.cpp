@@ -80,13 +80,15 @@ static void setup_analysis_plot(sciplot::Plot2D& plot) {
 
 // Setup for plots with a temperature colorbar on the right
 static void setup_colorbar_plot(sciplot::Plot2D& plot,
-                                double Tmin, double Tmax) {
+                                double Tmin, double Tmax,
+                                bool log_cb = false) {
     setup_analysis_plot(plot);
     plot.gnuplot("set rmargin 14");  // room for colorbar
     plot.gnuplot(TEMP_PALETTE);
     char cbr[128];
     snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
     plot.gnuplot(cbr);
+    if (log_cb) plot.gnuplot("set log cb");
     plot.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,13' offset 1,0");
     plot.gnuplot("set cbtics font 'Helvetica,11'");
     plot.gnuplot("set colorbox vertical user origin 0.88, 0.15 size 0.025, 0.7");
@@ -118,45 +120,7 @@ static std::vector<double> read_frequencies(const char* datadir, int N) {
     return omega;
 }
 
-// Read a binary config (2N doubles: re0 im0 re1 im1 ...) and compute
-// normalized intensities I_k = |a_k|^2 / sum_j |a_j|^2
-static bool read_config_intensities(const char* filename, int N,
-                                    std::vector<double>& Ik) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) return false;
-    std::vector<double> buf(2 * N);
-    size_t nr = fread(buf.data(), sizeof(double), 2 * N, f);
-    fclose(f);
-    if ((int)nr != 2 * N) return false;
-    Ik.resize(N);
-    double total = 0;
-    for (int k = 0; k < N; k++) {
-        double re = buf[2*k], im = buf[2*k + 1];
-        Ik[k] = re * re + im * im;
-        total += Ik[k];
-    }
-    if (total > 0)
-        for (int k = 0; k < N; k++) Ik[k] /= total;
-    return true;
-}
 
-// Read a binary config and return raw complex amplitudes (re, im) pairs
-static bool read_config_spins(const char* filename, int N,
-                              std::vector<double>& re, std::vector<double>& im) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) return false;
-    std::vector<double> buf(2 * N);
-    size_t nr = fread(buf.data(), sizeof(double), 2 * N, f);
-    fclose(f);
-    if ((int)nr != 2 * N) return false;
-    re.resize(N);
-    im.resize(N);
-    for (int k = 0; k < N; k++) {
-        re[k] = buf[2*k];
-        im[k] = buf[2*k + 1];
-    }
-    return true;
-}
 
 // Find all iteration numbers for a given (tidx, rep) in the config directory
 static std::vector<int> find_config_iters(const char* confdir, int tidx, int rep) {
@@ -178,29 +142,7 @@ static std::vector<int> find_config_iters(const char* confdir, int tidx, int rep
     return iters;
 }
 
-// Find config files matching conf_T{tidx}_r{rep}_iter*.bin in confdir
-static std::vector<std::string> find_configs_pt(const char* confdir,
-                                                int tidx, int rep) {
-    std::vector<std::string> files;
-    char prefix[128];
-    snprintf(prefix, sizeof(prefix), "conf_T%d_r%d_iter", tidx, rep);
-    int plen = (int)strlen(prefix);
-    DIR* dir = opendir(confdir);
-    if (!dir) return files;
-    struct dirent* ent;
-    while ((ent = readdir(dir)) != nullptr) {
-        if (strncmp(ent->d_name, prefix, plen) == 0) {
-            const char* rest = ent->d_name + plen;
-            if (strstr(rest, ".bin")) {
-                char fp[768];
-                snprintf(fp, sizeof(fp), "%s/%s", confdir, ent->d_name);
-                files.push_back(fp);
-            }
-        }
-    }
-    closedir(dir);
-    return files;
-}
+
 
 // ----------------------------------------------------------------
 // ConfigStore: loads all spin configurations from configs.bin
@@ -482,14 +424,14 @@ static std::vector<ExSweepBlock> read_exchange_sweep_data(const char* datadir) {
     return blocks;
 }
 
-// Find all sample directories matching data/PT_N{N}_NT{NT}_NR{nrep}_S*
-static std::vector<int> find_samples(int N, int NT, int nrep) {
+// Find all sample directories matching data/{prefix}_N{N}_NT{NT}_NR{nrep}_S*
+static std::vector<int> find_samples(int N, int NT, int nrep, const char* prefix) {
     std::vector<int> labels;
     DIR* dir = opendir("data");
     if (!dir) return labels;
 
     char pat[128];
-    snprintf(pat, sizeof(pat), "PT_N%d_NT%d_NR%d_S", N, NT, nrep);
+    snprintf(pat, sizeof(pat), "%s_N%d_NT%d_NR%d_S", prefix, N, NT, nrep);
     int plen = (int)strlen(pat);
 
     struct dirent* ent;
@@ -497,7 +439,7 @@ static std::vector<int> find_samples(int N, int NT, int nrep) {
         if (strncmp(ent->d_name, pat, plen) == 0) {
             int label = atoi(ent->d_name + plen);
             char check[128];
-            snprintf(check, sizeof(check), "PT_N%d_NT%d_NR%d_S%d", N, NT, nrep, label);
+            snprintf(check, sizeof(check), "%s_N%d_NT%d_NR%d_S%d", prefix, N, NT, nrep, label);
             if (strcmp(ent->d_name, check) == 0)
                 labels.push_back(label);
         }
@@ -544,13 +486,15 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-nbins <nbins>] [-nthreads <t>] [--plot]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-nbins <nbins>] [-nbins_spec <B>] [-nthreads <t>] [--sparse] [--plot] [--log-temp]\n", prog);
     exit(1);
 }
 
 int main(int argc, char** argv) {
-    int N = 0, NT = 0, nrep = 1, nbins = 100, nthreads = 0;
+    int N = 0, NT = 0, nrep = 1, nbins = 100, nbins_spec = 0, nthreads = 0;
     bool do_plot = false;
+    bool sparse = false;
+    bool log_temp = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-N") == 0 && i + 1 < argc)
@@ -561,35 +505,44 @@ int main(int argc, char** argv) {
             nrep = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nbins") == 0 && i + 1 < argc)
             nbins = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-nbins_spec") == 0 && i + 1 < argc)
+            nbins_spec = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nthreads") == 0 && i + 1 < argc)
             nthreads = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--sparse") == 0)
+            sparse = true;
         else if (strcmp(argv[i], "--plot") == 0)
             do_plot = true;
+        else if (strcmp(argv[i], "--log-temp") == 0)
+            log_temp = true;
         else usage(argv[0]);
     }
+    const char* prefix = sparse ? "PTS" : "PT";
     if (nthreads <= 0)
         nthreads = (int)std::thread::hardware_concurrency();
     if (nthreads < 1) nthreads = 1;
     if (N < 4 || NT < 2) usage(argv[0]);
+    if (nbins_spec <= 0) nbins_spec = N;
 
-    auto labels = find_samples(N, NT, nrep);
+    auto labels = find_samples(N, NT, nrep, prefix);
     if (labels.empty()) {
-        fprintf(stderr, "No sample directories found for data/PT_N%d_NT%d_NR%d_S*\n", N, NT, nrep);
+        fprintf(stderr, "No sample directories found for data/%s_N%d_NT%d_NR%d_S*\n", prefix, N, NT, nrep);
         return 1;
     }
     int nsamples = (int)labels.size();
 
-    char outdir[512];
-    snprintf(outdir, sizeof(outdir), "analysis/PT_N%d_NT%d_NR%d", N, NT, nrep);
+    char outdir[256];
+    snprintf(outdir, sizeof(outdir), "analysis/%s_N%d_NT%d_NR%d", prefix, N, NT, nrep);
     mkdir_p(outdir);
 
     printf("\n");
     printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║           p-Spin 2+4 :: Analysis (PT)            ║\n");
+    printf("║       p-Spin 2+4 :: Analysis (%s)            ║\n", prefix);
     printf("╚══════════════════════════════════════════════════╝\n");
     printf("  %-22s %d\n", "N", N);
     printf("  %-22s %d\n", "NT", NT);
     printf("  %-22s %d\n", "nrep", nrep);
+    printf("  %-22s %s\n", "mode", sparse ? "sparse (PTS)" : "standard (PT)");
     printf("  %-22s %d\n", "samples", nsamples);
     printf("  %-22s %s/\n\n", "output", outdir);
 
@@ -598,8 +551,8 @@ int main(int argc, char** argv) {
     std::vector<std::vector<ExBlock>> all_ex(nsamples);
     std::vector<std::vector<ExSweepBlock>> all_ex_sweep(nsamples);
     for (int s = 0; s < nsamples; s++) {
-        char sdir[512];
-        snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d", N, NT, nrep, labels[s]);
+        char sdir[256];
+        snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d", prefix, N, NT, nrep, labels[s]);
         all_data[s] = read_pt_data(sdir, nrep);
         all_ex[s] = read_exchange_data(sdir);
         all_ex_sweep[s] = read_exchange_sweep_data(sdir);
@@ -1006,31 +959,40 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
-    // Intensity Spectrum
+    // Intensity Spectrum (rebinned)
     // ================================================================
     {
-        // Read frequencies from reference sample
-        char refdir[512];
-        snprintf(refdir, sizeof(refdir), "data/PT_N%d_NT%d_NR%d_S%d",
-                 N, NT, nrep, labels[ref]);
-        auto omega = read_frequencies(refdir, N);
+        printf("\n── Intensity spectrum (nbins_spec=%d) ──────────────\n", nbins_spec);
 
-        // Per-sample, per-temperature mean spectrum
-        // spec_s[s][ti][k] = <I_k> averaged over (replica, iteration) configs
-        std::vector<std::vector<std::vector<double>>> spec_s(nsamples);
+        // Read per-sample frequencies
+        std::vector<std::vector<double>> omega_s(nsamples);
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            omega_s[s] = read_frequencies(sdir, N);
+        }
+
+        // Rebinned spectrum: spec_bin_s[s][ti][b]
+        // Uniform bins on [0,1], bin width = 1.0 / nbins_spec
+        double dw = 1.0 / nbins_spec;
+        std::vector<std::vector<std::vector<double>>> spec_bin_s(nsamples);
 
         for (int s = 0; s < nsamples; s++) {
-            char sdir[512];
-            snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
-                     N, NT, nrep, labels[s]);
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
-            spec_s[s].resize(ntemps, std::vector<double>(N, 0.0));
+            spec_bin_s[s].resize(ntemps, std::vector<double>(nbins_spec, 0.0));
 
             for (int ti = 0; ti < ntemps; ti++) {
                 int tidx = all_data[ref][ti].tidx;
                 int nconfigs = 0;
+
+                // Accumulate rebinned spectrum over configs
+                std::vector<double> bin_acc(nbins_spec, 0.0);
 
                 for (int r = 0; r < nrep; r++) {
                     for (auto& entry : cstore.entries[tidx][r]) {
@@ -1043,16 +1005,21 @@ int main(int argc, char** argv) {
                         }
                         if (total > 0) {
                             for (int k = 0; k < N; k++) Ik[k] /= total;
-                            for (int k = 0; k < N; k++)
-                                spec_s[s][ti][k] += Ik[k];
+                            // Rebin: assign I_k to bin based on omega_s[s][k]
+                            for (int k = 0; k < N; k++) {
+                                int b = (int)(omega_s[s][k] / dw);
+                                if (b < 0) b = 0;
+                                if (b >= nbins_spec) b = nbins_spec - 1;
+                                bin_acc[b] += Ik[k];
+                            }
                             nconfigs++;
                         }
                     }
                 }
 
                 if (nconfigs > 0) {
-                    for (int k = 0; k < N; k++)
-                        spec_s[s][ti][k] /= nconfigs;
+                    for (int b = 0; b < nbins_spec; b++)
+                        spec_bin_s[s][ti][b] = bin_acc[b] / nconfigs;
                 }
             }
             printf("  Sample S%d: spectrum computed\n", labels[s]);
@@ -1063,27 +1030,23 @@ int main(int argc, char** argv) {
         snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
         FILE* fsp = fopen(specfile, "w");
         if (fsp) {
-            fprintf(fsp, "# Intensity spectrum: I_k = |a_k|^2 / sum_j |a_j|^2\n");
-            fprintf(fsp, "# N=%d NT=%d nrep=%d nsamples=%d\n", N, NT, nrep, nsamples);
-            fprintf(fsp, "# Columns: frequency  Intensity  Error_jk  Temperature\n");
+            fprintf(fsp, "# Rebinned intensity spectrum: I(omega) on uniform grid [0,1]\n");
+            fprintf(fsp, "# N=%d NT=%d nrep=%d nsamples=%d nbins_spec=%d\n",
+                    N, NT, nrep, nsamples, nbins_spec);
+            fprintf(fsp, "# Columns: omega_center  Intensity  Error_jk  Temperature\n");
             fprintf(fsp, "# NT blocks separated by blank lines\n");
-
-            // Sort index by frequency
-            std::vector<int> order(N);
-            for (int k = 0; k < N; k++) order[k] = k;
-            std::sort(order.begin(), order.end(),
-                      [&](int a, int b) { return omega[a] < omega[b]; });
 
             for (int ti = 0; ti < ntemps; ti++) {
                 double T = all_data[ref][ti].T;
                 fprintf(fsp, "\n");
 
-                for (int ik = 0; ik < N; ik++) {
-                    int k = order[ik];
+                for (int b = 0; b < nbins_spec; b++) {
+                    double wc = (b + 0.5) * dw;
+
                     // Full sample mean
                     double fI = 0;
                     for (int s = 0; s < nsamples; s++)
-                        fI += spec_s[s][ti][k];
+                        fI += spec_bin_s[s][ti][b];
                     fI /= nsamples;
 
                     // Jackknife error over samples
@@ -1092,15 +1055,14 @@ int main(int argc, char** argv) {
                         double lI = 0;
                         for (int s = 0; s < nsamples; s++) {
                             if (s == j) continue;
-                            lI += spec_s[s][ti][k];
+                            lI += spec_bin_s[s][ti][b];
                         }
                         lI /= (nsamples - 1);
                         jI += (lI - fI) * (lI - fI);
                     }
                     jI = sqrt((nsamples - 1.0) / nsamples * jI);
 
-                    fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n",
-                            omega[k], fI, jI, T);
+                    fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n", wc, fI, jI, T);
                 }
             }
             fclose(fsp);
@@ -1124,9 +1086,9 @@ int main(int argc, char** argv) {
         std::vector<std::vector<std::vector<double>>> hist_s(nsamples);
 
         for (int s = 0; s < nsamples; s++) {
-            char sdir[512];
-            snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
-                     N, NT, nrep, labels[s]);
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -1161,15 +1123,17 @@ int main(int argc, char** argv) {
                     std::vector<double> local_hist(nbins, 0.0);
                     long long n_overlaps = 0;
 
+                    // Pre-allocate spin buffers outside sweep loop
+                    std::vector<std::vector<double>> sre(nrep, std::vector<double>(N));
+                    std::vector<std::vector<double>> sim(nrep, std::vector<double>(N));
+
                     for (int ci = 0; ci < (int)common_iters.size(); ci++) {
                         int iter = common_iters[ci];
 
-                        std::vector<std::vector<double>> sre(nrep), sim(nrep);
                         bool all_ok = true;
                         for (int r = 0; r < nrep; r++) {
                             auto* ep = cstore.find_entry(tidx, r, iter);
                             if (!ep) { all_ok = false; break; }
-                            sre[r].resize(N); sim[r].resize(N);
                             for (int k = 0; k < N; k++) {
                                 sre[r][k] = ep->data[2*k];
                                 sim[r][k] = ep->data[2*k+1];
@@ -1271,9 +1235,9 @@ int main(int argc, char** argv) {
         std::vector<std::vector<std::vector<double>>> ifo_hist_s(nsamples);
 
         for (int s = 0; s < nsamples; s++) {
-            char sdir[512];
-            snprintf(sdir, sizeof(sdir), "data/PT_N%d_NT%d_NR%d_S%d",
-                     N, NT, nrep, labels[s]);
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -1435,7 +1399,7 @@ int main(int argc, char** argv) {
         using namespace sciplot;
         printf("\n── Generating plots ────────────────────────────────\n");
 
-        char plotdir[512];
+        char plotdir[384];
         snprintf(plotdir, sizeof(plotdir), "%s/plots", outdir);
         mkdir_p(plotdir);
 
@@ -1470,7 +1434,7 @@ int main(int argc, char** argv) {
                     int nb = (int)blocks.size();
                     double Tmin = blocks.back()[0].T;
                     double Tmax = blocks.front()[0].T;
-                    setup_colorbar_plot(plot, Tmin, Tmax);
+                    setup_colorbar_plot(plot, Tmin, Tmax, log_temp);
                     plot.xlabel("{/Helvetica-Oblique {/Symbol w}}");
                     plot.ylabel("{/Helvetica-Oblique I}_{/Helvetica-Oblique k}");
                     plot.legend().hide();
@@ -1533,6 +1497,7 @@ int main(int argc, char** argv) {
                         setup_analysis_plot(plot);
                         plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("{/Helvetica-Oblique E} / {/Helvetica-Oblique N}");
+                        // if (log_temp) plot.gnuplot("set logscale x");
                         plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vElo, vEhi)
                             .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
@@ -1552,6 +1517,7 @@ int main(int argc, char** argv) {
                         setup_analysis_plot(plot);
                         plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("MC acceptance");
+                        // if (log_temp) plot.gnuplot("set logscale x");
                         plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vAlo, vAhi)
                             .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
@@ -1571,6 +1537,7 @@ int main(int argc, char** argv) {
                         setup_analysis_plot(plot);
                         plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("{/Helvetica-Oblique C}_{/Helvetica-Oblique v}");
+                        // if (log_temp) plot.gnuplot("set logscale x");
                         plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vCvlo, vCvhi)
                             .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
@@ -1619,6 +1586,7 @@ int main(int argc, char** argv) {
                     setup_analysis_plot(plot);
                     plot.xlabel("{/Helvetica-Oblique T}");
                     plot.ylabel("PT exchange rate");
+                    // if (log_temp) plot.gnuplot("set logscale x");
                     plot.legend().atTopRight().fontSize(12);
                     plot.drawCurvesFilled(vT, vRlo, vRhi)
                         .fillColor("#8da0cb").fillIntensity(0.35).fillTransparent()
@@ -1682,6 +1650,7 @@ int main(int argc, char** argv) {
                         char cbr[128];
                         snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                         plot.gnuplot(cbr);
+                        if (log_temp) plot.gnuplot("set log cb");
                         plot.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,12'");
                         plot.gnuplot("set colorbox");
 
@@ -1695,7 +1664,10 @@ int main(int argc, char** argv) {
                                 else if (val_col == 1) vy[i] = bl[i].A;
                                 else vy[i] = bl[i].PT;
                             }
-                            double frac = (Tmax > Tmin) ? (bl[0].T - Tmin) / (Tmax - Tmin) : 0.5;
+                            double frac = (Tmax > Tmin)
+                                ? (log_temp ? (log(bl[0].T) - log(Tmin)) / (log(Tmax) - log(Tmin))
+                                            : (bl[0].T - Tmin) / (Tmax - Tmin))
+                                : 0.5;
                             plot.drawCurve(vx, vy)
                                 .lineColor(temp_color(frac))
                                 .lineWidth(2)
@@ -1756,7 +1728,7 @@ int main(int argc, char** argv) {
                 int nb = (int)oblocks.size();
                 double Tmin_ov = oblocks.back()[0].T;
                 double Tmax_ov = oblocks.front()[0].T;
-                setup_colorbar_plot(plot, Tmin_ov, Tmax_ov);
+                setup_colorbar_plot(plot, Tmin_ov, Tmax_ov, log_temp);
 
                 for (int bi = 0; bi < nb; bi++) {
                     auto& bl = oblocks[bi];
@@ -1821,7 +1793,7 @@ int main(int argc, char** argv) {
                 int nb = (int)iblocks.size();
                 double Tmin_if = iblocks.back()[0].T;
                 double Tmax_if = iblocks.front()[0].T;
-                setup_colorbar_plot(plot, Tmin_if, Tmax_if);
+                setup_colorbar_plot(plot, Tmin_if, Tmax_if, log_temp);
 
                 for (int bi = 0; bi < nb; bi++) {
                     auto& bl = iblocks[bi];

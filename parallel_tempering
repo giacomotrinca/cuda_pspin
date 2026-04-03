@@ -5,7 +5,10 @@ SIZE=18
 TMAX=2.0
 TMIN=0.01
 NT=20
-J=1.0
+J=2.0
+J0=0.0
+ALPHA=0.5
+ALPHA0=0.5
 ITER=14
 SEED=$RANDOM
 NREP=2
@@ -26,6 +29,9 @@ for arg in "$@"; do
         --tmin=*)      TMIN="${arg#*=}" ;;
         --nt=*)        NT="${arg#*=}" ;;
         --J=*)         J="${arg#*=}" ;;
+        --J0=*)        J0="${arg#*=}" ;;
+        --alpha=*)     ALPHA="${arg#*=}" ;;
+        --alpha0=*)    ALPHA0="${arg#*=}" ;;
         --iter=*)      ITER="${arg#*=}" ;;
         --seed=*)      SEED="${arg#*=}" ;;
         --nrep=*)      NREP="${arg#*=}" ;;
@@ -43,7 +49,10 @@ for arg in "$@"; do
             echo "  --tmax=T        Max temperature (default: $TMAX)"
             echo "  --tmin=T        Min temperature (default: $TMIN)"
             echo "  --nt=N          Number of temperatures (default: $NT)"
-            echo "  --J=J           Coupling scale (default: $J)"
+            echo "  --J=J           Total coupling scale (default: $J)"
+            echo "  --J0=J0         Mean coupling scale (default: $J0)"
+            echo "  --alpha=A       4-body fraction of J: J4=a*J, J2=(1-a)*J (default: $ALPHA)"
+            echo "  --alpha0=A0     4-body fraction of J0 (default: $ALPHA0)"
             echo "  --iter=K        MC sweeps = 2^K (default: $ITER)"
             echo "  --seed=S        RNG seed (default: random)"
             echo "  --nrep=R        Independent copies per temperature (default: $NREP)"
@@ -79,6 +88,9 @@ printf "  %-22s %s\n" "total replicas" "$TOTAL_REPLICAS"
 printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
 printf "  %-22s %s\n" "J" "$J"
+printf "  %-22s %s\n" "J0" "$J0"
+printf "  %-22s %s\n" "alpha" "$ALPHA"
+printf "  %-22s %s\n" "alpha0" "$ALPHA0"
 printf "  %-22s %s  (2^%s)\n" "sweeps" "$MC_ITER" "$ITER"
 printf "  %-22s %s\n" "pt_freq" "$PT_FREQ"
 printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
@@ -122,6 +134,7 @@ fi
     -N "$SIZE" \
     -Tmax "$TMAX" -Tmin "$TMIN" -NT "$NT" \
     -J "$J" \
+    -J0 "$J0" -alpha "$ALPHA" -alpha0 "$ALPHA0" \
     -iter "$MC_ITER" \
     -seed "$SEED" \
     -nrep "$NREP" \

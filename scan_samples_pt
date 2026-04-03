@@ -8,19 +8,23 @@ SIZE=18
 TMAX=1.6
 TMIN=0.05
 NT=30
-J=1.0
+J=2.0
+J0=0.0
+ALPHA=0.5
+ALPHA0=0.5
 ITER=20
 SEED=$RANDOM
 NREP=16
 PT_FREQ=64
 SAVE_FREQ=64
-NSAMPLES=10
+NSAMPLES=5
 DEV=0
 FMC=2 # 0=FullyConnected, 1=comb, 2=uniform
 GAMMA=""
-SHOW_OUTPUT=2
+SHOW_OUTPUT=0
 LOG_TEMP=0
 SPARSE=0
+COMPRESS=0
 
 # Parse arguments
 for arg in "$@"; do
@@ -30,6 +34,9 @@ for arg in "$@"; do
         --tmin=*)      TMIN="${arg#*=}" ;;
         --nt=*)        NT="${arg#*=}" ;;
         --J=*)         J="${arg#*=}" ;;
+        --J0=*)        J0="${arg#*=}" ;;
+        --alpha=*)     ALPHA="${arg#*=}" ;;
+        --alpha0=*)    ALPHA0="${arg#*=}" ;;
         --iter=*)      ITER="${arg#*=}" ;;
         --seed=*)      SEED="${arg#*=}" ;;
         --nrep=*)      NREP="${arg#*=}" ;;
@@ -42,6 +49,7 @@ for arg in "$@"; do
         --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
         --log-temp)    LOG_TEMP=1 ;;
         --sparse)      SPARSE=1 ;;
+        --compress)    COMPRESS=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N        Number of spins (default: $SIZE)"
@@ -49,6 +57,9 @@ for arg in "$@"; do
             echo "  --tmin=T        Min temperature (default: $TMIN)"
             echo "  --nt=N          Number of temperatures (default: $NT)"
             echo "  --J=J           Coupling scale (default: $J)"
+            echo "  --J0=J0         Mean coupling scale (default: $J0)"
+            echo "  --alpha=A       4-body fraction of J (default: $ALPHA)"
+            echo "  --alpha0=A0     4-body fraction of J0 (default: $ALPHA0)"
             echo "  --iter=K        MC sweeps = 2^K (default: $ITER)"
             echo "  --seed=S        Initial RNG seed (default: random)"
             echo "  --nrep=R        Independent copies per temperature (default: $NREP)"
@@ -61,6 +72,7 @@ for arg in "$@"; do
             echo "  --show-output=L Verbosity: 0=silent 1=compact 2=detailed (default: $SHOW_OUTPUT)"
             echo "  --log-temp      Geometric temperature schedule: T_k = A*T_{k-1} (default: linear)"
             echo "  --sparse        Use sparse variant (smoothed cube + sparse H4)"
+            echo "  --compress      Compress data files with xz -9 after each sample"
             exit 0
             ;;
         *)
@@ -90,6 +102,9 @@ printf "  %-22s %s\n" "total replicas" "$TOTAL_REPLICAS"
 printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
 printf "  %-22s %s\n" "J" "$J"
+printf "  %-22s %s\n" "J0" "$J0"
+printf "  %-22s %s\n" "alpha" "$ALPHA"
+printf "  %-22s %s\n" "alpha0" "$ALPHA0"
 printf "  %-22s %s  (2^%s)\n" "sweeps" "$SWEEPS" "$ITER"
 printf "  %-22s %s\n" "pt_freq" "$PT_FREQ"
 printf "  %-22s %s\n" "save_freq" "$SAVE_FREQ"
@@ -99,6 +114,7 @@ printf "  %-22s %s\n" "GPU device" "$DEV"
 if [ -n "$FMC" ]; then printf "  %-22s %s\n" "FMC mode" "$FMC"; fi
 if [ "$LOG_TEMP" -eq 1 ]; then printf "  %-22s %s\n" "T schedule" "geometric"; else printf "  %-22s %s\n" "T schedule" "linear"; fi
 if [ "$SPARSE" -eq 1 ]; then printf "  %-22s %s\n" "variant" "SPARSE (cube)"; printf "  %-22s %s (= N)\n" "sparse quartets" "$SIZE"; fi
+if [ "$COMPRESS" -eq 1 ]; then printf "  %-22s %s\n" "compress" "xz -9"; fi
 echo ""
 
 for S in $(seq 0 $((NSAMPLES - 1))); do
@@ -106,9 +122,22 @@ for S in $(seq 0 $((NSAMPLES - 1))); do
     printf '─%.0s' $(seq 1 28)
     printf "\n"
     if [ "$SPARSE" -eq 1 ]; then
-        ./parallel_tempering_sparse --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
+        ./parallel_tempering_sparse --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --J0=$J0 --alpha=$ALPHA --alpha0=$ALPHA0 --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
     else
-        ./parallel_tempering --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
+        ./parallel_tempering --size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --J0=$J0 --alpha=$ALPHA --alpha0=$ALPHA0 --iter=$ITER --seed=$SEED --nrep=$NREP --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ --label=$S --dev=$DEV --fmc=$FMC ${GAMMA:+--gamma=$GAMMA} --show-output=$SHOW_OUTPUT $([ "$LOG_TEMP" -eq 1 ] && echo "--log-temp")
+    fi
+    # Compress data if requested
+    if [ "$COMPRESS" -eq 1 ]; then
+        if [ "$SPARSE" -eq 1 ]; then
+            DATADIR="data/PTS_N${SIZE}_NT${NT}_NR${NREP}_S${S}"
+        else
+            DATADIR="data/PT_N${SIZE}_NT${NT}_NR${NREP}_S${S}"
+        fi
+        if [ -d "$DATADIR" ]; then
+            echo "  Compressing $DATADIR ..."
+            find "$DATADIR" \( -name '*.bin' -o -name '*.txt' \) ! -name '*.xz' -exec xz -9 {} +
+            echo "  Done."
+        fi
     fi
     echo ""
     SEED=$RANDOM

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <algorithm>
 #include <curand_kernel.h>
 
@@ -66,6 +67,7 @@ __global__ void mc_sweep_kernel(
     cuDoubleComplex* all_spins,   // [nrep * N]
     const cuDoubleComplex* g2,    // [N * N] shared
     const cuDoubleComplex* g4,    // [C(N,4)] shared
+    const uint8_t* g4_mask,       // [C(N,4)] 3-bit channel mask
     int N, int nrep,
     const double* betas,
     curandStatePhilox4_32_10_t* rng_states,  // [nrep]
@@ -111,7 +113,6 @@ __global__ void mc_sweep_kernel(
     long long n_type12 = (long long)Nm2 * (Nm2 - 1) * (Nm2 - 2) / 6; // C(N-2,3)
     long long n_type3  = (long long)Nm2 * (Nm2 - 1) / 2;             // C(N-2,2)
     long long n_h4     = 2 * n_type12 + n_type3;
-    long long nq = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;  // C(N,4)
 
     // Conjugation masks per channel (bit p set = position p conjugated)
     // ch 0: conj {kk,ll}  mask=0xC   ch 1: conj {jj,kk} mask=0x6   ch 2: conj {jj,ll} mask=0xA
@@ -161,10 +162,8 @@ __global__ void mc_sweep_kernel(
             for (int k = tid; k < N; k += bdim) {
                 if (k != i0 && k != j0) {
                     cuDoubleComplex ak_c = cuConj(s_spins[k]);
-                    int ri = (i0 < k) ? i0 : k, ci = (i0 < k) ? k : i0;
-                    sum_i = cuCadd(sum_i, cuCmul(g2[ri * N + ci], ak_c));
-                    int rj = (j0 < k) ? j0 : k, cj = (j0 < k) ? k : j0;
-                    sum_j = cuCadd(sum_j, cuCmul(g2[rj * N + cj], ak_c));
+                    sum_i = cuCadd(sum_i, cuCmul(g2[i0 * N + k], ak_c));
+                    sum_j = cuCadd(sum_j, cuCmul(g2[j0 * N + k], ak_c));
                 }
             }
             local_dE -= cuCreal(cuCmul(delta_i, sum_i));
@@ -243,11 +242,15 @@ __global__ void mc_sweep_kernel(
                         + (long long)kk*(kk-1)*(kk-2)/6
                         + (long long)jj*(jj-1)/2 + ii;
 
+            // Look up coupling once (shared across all 3 channels)
+            cuDoubleComplex gq = g4[q];
+            uint8_t qmask = g4_mask[q];
+            // Skip if coupling is zero or all channels filtered
+            if ((gq.x == 0.0 && gq.y == 0.0) || qmask == 0) continue;
+
             // Loop over 3 interaction channels
             for (int ch = 0; ch < 3; ch++) {
-                cuDoubleComplex gq = g4[(long long)ch * nq + q];
-                // Skip zero couplings (e.g. zeroed by FMC)
-                if (gq.x == 0.0 && gq.y == 0.0) continue;
+                if (!(qmask & (1 << ch))) continue;
 
                 int cm = conj_masks[ch];
 
@@ -335,6 +338,7 @@ __global__ void init_energy_kernel(
     const cuDoubleComplex* all_spins,
     const cuDoubleComplex* g2,
     const cuDoubleComplex* g4,
+    const uint8_t* g4_mask,
     int N, int nrep,
     double* energies,
     int h2_active
@@ -364,45 +368,45 @@ __global__ void init_energy_kernel(
         }
     }
 
-    // H4: iterate over 3*C(N,4) entries (3 channels per quartet)
-    long long nq_per_ch = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
-    long long total_g4 = 3 * nq_per_ch;
-    for (long long idx = (long long)blockIdx.x * bdim + tid; idx < total_g4;
-         idx += (long long)gridDim.x * bdim) {
-        // Determine channel and quartet index
-        int ch;
-        long long q;
-        if (idx < nq_per_ch)          { ch = 0; q = idx; }
-        else if (idx < 2 * nq_per_ch) { ch = 1; q = idx - nq_per_ch; }
-        else                          { ch = 2; q = idx - 2 * nq_per_ch; }
+    // H4: iterate over C(N,4) quartets, inner loop on 3 channels using mask
+    long long nq = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    for (long long q = (long long)blockIdx.x * bdim + tid; q < nq;
+         q += (long long)gridDim.x * bdim) {
+        cuDoubleComplex gq = g4[q];
+        uint8_t qmask = g4_mask[q];
+        if ((gq.x == 0.0 && gq.y == 0.0) || qmask == 0) continue;
 
         int ii, jj, kk, ll;
-        ll = 3;
-        while ((long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24 <= q) ll++;
-        ll--;
-        long long rem = q - (long long)ll * (ll - 1) * (ll - 2) * (ll - 3) / 24;
-        kk = 2;
-        while ((long long)kk * (kk - 1) * (kk - 2) / 6 <= rem) kk++;
-        kk--;
-        rem -= (long long)kk * (kk - 1) * (kk - 2) / 6;
-        jj = 1;
-        while ((long long)jj * (jj - 1) / 2 <= rem) jj++;
-        jj--;
-        rem -= (long long)jj * (jj - 1) / 2;
-        ii = (int)rem;
+        {
+            int l = 3;
+            while ((long long)l * (l - 1) * (l - 2) * (l - 3) / 24 <= q) l++;
+            l--;
+            long long rem = q - (long long)l * (l - 1) * (l - 2) * (l - 3) / 24;
+            int k = 2;
+            while ((long long)k * (k - 1) * (k - 2) / 6 <= rem) k++;
+            k--;
+            rem -= (long long)k * (k - 1) * (k - 2) / 6;
+            int j = 1;
+            while ((long long)j * (j - 1) / 2 <= rem) j++;
+            j--;
+            rem -= (long long)j * (j - 1) / 2;
+            ii = (int)rem; jj = j; kk = k; ll = l;
+        }
 
-        cuDoubleComplex gq = g4[idx];
         cuDoubleComplex ai = spins[ii], aj = spins[jj];
         cuDoubleComplex ak = spins[kk], al = spins[ll];
 
-        // Channel-dependent conjugation
-        cuDoubleComplex s0, s1, s2, s3;
-        if (ch == 0)      { s0 = ai; s1 = aj;         s2 = cuConj(ak); s3 = cuConj(al); }
-        else if (ch == 1) { s0 = ai; s1 = cuConj(aj); s2 = cuConj(ak); s3 = al; }
-        else              { s0 = ai; s1 = cuConj(aj); s2 = ak;         s3 = cuConj(al); }
+        for (int ch = 0; ch < 3; ch++) {
+            if (!(qmask & (1 << ch))) continue;
 
-        cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(s0, s1), cuCmul(s2, s3)));
-        local_sum += -cuCreal(prod);
+            cuDoubleComplex s0, s1, s2, s3;
+            if (ch == 0)      { s0 = ai; s1 = aj;         s2 = cuConj(ak); s3 = cuConj(al); }
+            else if (ch == 1) { s0 = ai; s1 = cuConj(aj); s2 = cuConj(ak); s3 = al; }
+            else              { s0 = ai; s1 = cuConj(aj); s2 = ak;         s3 = cuConj(al); }
+
+            cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(s0, s1), cuCmul(s2, s3)));
+            local_sum += -cuCreal(prod);
+        }
     }
 
     sdata[tid] = local_sum;
@@ -437,14 +441,23 @@ MCState mc_init(const SimConfig& cfg) {
     CUDA_CHECK(cudaMemset(state.d_g2, 0, (long long)N * N * sizeof(cuDoubleComplex)));
 
     long long nq = n_quartets(N);
-    long long nq_tot = n_g4_total(N);  // 3 * C(N,4)
-    CUDA_CHECK(cudaMalloc(&state.d_g4, nq_tot * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&state.d_g4, nq * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&state.d_g4_mask, nq * sizeof(uint8_t)));
+
+    // Compute effective coupling scales from alpha parametrization
+    //   J2 = (1-alpha)*J,  J4 = alpha*J       (variance)
+    //   J2_0 = (1-alpha0)*J0,  J4_0 = alpha0*J0  (mean)
+    double J2   = (1.0 - cfg.alpha)  * cfg.J;
+    double J4   = cfg.alpha           * cfg.J;
+    double J2_0 = (1.0 - cfg.alpha0) * cfg.J0;
+    double J4_0 = cfg.alpha0          * cfg.J0;
 
     // Generate disorder (same for all replicas, use master seed)
     // With comb frequencies (fmc_mode==1), H2 pairs never survive FMC → skip g2
     if (cfg.fmc_mode != 1)
-        generate_g2(state.d_g2, N, cfg.J, cfg.seed + 1000);
-    generate_g4(state.d_g4, N, cfg.J, cfg.seed + 2000);
+        generate_g2(state.d_g2, N, J2, cfg.seed + 1000);
+    generate_g4(state.d_g4, N, J4, cfg.seed + 2000);
+    init_g4_mask(state.d_g4_mask, N);
 
     // FMC filtering
     if (cfg.fmc_mode > 0) {
@@ -478,25 +491,29 @@ MCState mc_init(const SimConfig& cfg) {
             delete[] h_g2;
         }
 
-        apply_fmc_g4(state.d_g4, N, d_omega, cfg.gamma);
+        apply_fmc_g4(state.d_g4_mask, N, d_omega, cfg.gamma);
         CUDA_CHECK(cudaFree(d_omega));
 
-        cuDoubleComplex* h_g4 = new cuDoubleComplex[nq_tot];
-        CUDA_CHECK(cudaMemcpy(h_g4, state.d_g4, nq_tot * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-        state.n_quart_active = 0;
-        for (long long q = 0; q < nq_tot; q++)
-            if (h_g4[q].x != 0.0 || h_g4[q].y != 0.0)
-                state.n_quart_active++;
-        delete[] h_g4;
+        state.n_quart_active = count_active_g4(state.d_g4_mask, N);
     } else {
         state.h_omega = nullptr;
         state.n_pairs_active = n_pairs(N);
-        state.n_quart_active = nq_tot;
+        state.n_quart_active = n_g4_total(N);  // all 3 channels active
     }
 
-    // Rescale couplings with Var = J^2 * N / n_surviving
-    rescale_g2(state.d_g2, N, cfg.J, state.n_pairs_active);
-    rescale_g4(state.d_g4, N, cfg.J, state.n_quart_active);
+    // Rescale couplings: Var = J_eff^2 * N / n_surviving
+    rescale_g2(state.d_g2, N, J2, state.n_pairs_active);
+    rescale_g4(state.d_g4, N, J4, state.n_quart_active);
+
+    // Add mean shift: mean = J0_eff * N / n_surviving
+    if (J2_0 != 0.0 && state.n_pairs_active > 0) {
+        double mean_g2 = J2_0 * (double)N / (double)state.n_pairs_active;
+        shift_mean_couplings(state.d_g2, (long long)N * N, mean_g2);
+    }
+    if (J4_0 != 0.0 && state.n_quart_active > 0) {
+        double mean_g4 = J4_0 * (double)N / (double)state.n_quart_active;
+        shift_mean_couplings(state.d_g4, n_quartets(N), mean_g4);
+    }
 
     state.h2_active = (state.n_pairs_active > 0) ? 1 : 0;
 
@@ -530,12 +547,13 @@ MCState mc_init(const SimConfig& cfg) {
     CUDA_CHECK(cudaMalloc(&state.d_betas, nrep * sizeof(double)));
 
     // Compute initial energies on GPU
-    long long max_terms = (nq_tot > n_pairs(N)) ? nq_tot : n_pairs(N);
+    long long max_terms = (nq > n_pairs(N)) ? nq : n_pairs(N);
     int e_blocks = (int)((max_terms + 255) / 256);
     if (e_blocks > 1024) e_blocks = 1024;  // cap grid size in x
     dim3 e_grid(e_blocks, nrep);
     init_energy_kernel<<<e_grid, 256, 256 * sizeof(double)>>>(
-        state.d_spins, state.d_g2, state.d_g4, N, nrep, state.d_energies,
+        state.d_spins, state.d_g2, state.d_g4, state.d_g4_mask,
+        N, nrep, state.d_energies,
         state.h2_active);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -562,6 +580,7 @@ void mc_free(MCState& state) {
     if (state.d_spins)    CUDA_CHECK(cudaFree(state.d_spins));
     if (state.d_g2)       CUDA_CHECK(cudaFree(state.d_g2));
     if (state.d_g4)       CUDA_CHECK(cudaFree(state.d_g4));
+    if (state.d_g4_mask)  CUDA_CHECK(cudaFree(state.d_g4_mask));
     if (state.d_rng)      CUDA_CHECK(cudaFree(state.d_rng));
     if (state.d_energies) CUDA_CHECK(cudaFree(state.d_energies));
     if (state.d_accepted) CUDA_CHECK(cudaFree(state.d_accepted));
@@ -631,7 +650,7 @@ void mc_sweep(MCState& state, const SimConfig& cfg) {
                         + 2 * sizeof(int);
 
     mc_sweep_kernel<<<nrep, block_size, shared_bytes>>>(
-        state.d_spins, state.d_g2, state.d_g4,
+        state.d_spins, state.d_g2, state.d_g4, state.d_g4_mask,
         N, nrep, state.d_betas,
         state.d_rng, state.d_energies,
         state.d_accepted, state.d_proposed,
@@ -665,7 +684,7 @@ void mc_sweep_pt(MCState& state) {
                         + 2 * sizeof(int);
 
     mc_sweep_kernel<<<nrep, block_size, shared_bytes>>>(
-        state.d_spins, state.d_g2, state.d_g4,
+        state.d_spins, state.d_g2, state.d_g4, state.d_g4_mask,
         N, nrep, state.d_betas,
         state.d_rng, state.d_energies,
         state.d_accepted, state.d_proposed,

@@ -4,15 +4,21 @@
 
 SIZE=18
 NREP=4
+COMPRESS=0
+LOG_TEMP=0
 
 for arg in "$@"; do
     case "$arg" in
         --size=*)   SIZE="${arg#*=}" ;;
         --nrep=*)   NREP="${arg#*=}" ;;
+        --log-temp) LOG_TEMP=1 ;;
+        --compress) COMPRESS=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N    Number of spins (default: $SIZE)"
             echo "  --nrep=R    Number of replicas (default: $NREP)"
+            echo "  --log-temp  Use log scale for temperature axes and colorbars"
+            echo "  --compress  Decompress before analysis, re-compress after"
             exit 0
             ;;
         *)
@@ -22,4 +28,29 @@ for arg in "$@"; do
     esac
 done
 
-./bin/analysis_sa -N "$SIZE" -nrep "$NREP"
+# Decompress .xz files in data directories if --compress
+if [ "$COMPRESS" -eq 1 ]; then
+    for d in data/SA_N${SIZE}_NR${NREP}_S*/; do
+        [ -d "$d" ] || continue
+        xzcount=$(find "$d" -name '*.xz' 2>/dev/null | head -1)
+        if [ -n "$xzcount" ]; then
+            echo "  Decompressing $d ..."
+            find "$d" -name '*.xz' -exec xz -d {} +
+        fi
+    done
+fi
+
+CMD="./bin/analysis_sa -N $SIZE -nrep $NREP --plot"
+if [ "$LOG_TEMP" -eq 1 ]; then
+    CMD="$CMD --log-temp"
+fi
+$CMD
+
+# Re-compress if --compress
+if [ "$COMPRESS" -eq 1 ]; then
+    for d in data/SA_N${SIZE}_NR${NREP}_S*/; do
+        [ -d "$d" ] || continue
+        echo "  Re-compressing $d ..."
+        find "$d" \( -name '*.bin' -o -name '*.txt' \) ! -name '*.xz' -exec xz -9 {} +
+    done
+fi

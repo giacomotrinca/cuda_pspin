@@ -20,7 +20,9 @@ NVFLAGS = -std=c++11 -arch=$(ARCH) -O3 -Iinclude -DNDEBUG
 CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 
-.PHONY: all clean mc sa pt pts analysis_mc analysis_sa analysis_pt bench bench_plot
+.PHONY: all clean mc sa pt pts analysis_mc analysis_sa analysis_pt bench bench_plot smcu_test \
+       test_quartet test_spherical test_delta_e test_inf_temp test_detailed_balance \
+       test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift tests
 
 all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
      bin/analysis bin/analysis_sa bin/analysis_pt
@@ -35,6 +37,22 @@ analysis_sa:  dirs bin/analysis_sa
 analysis_pt:  dirs bin/analysis_pt
 bench:        dirs bin/benchmark
 bench_plot:   dirs bin/plot_benchmark
+smcu_test:    dirs bin/smoothed_cube
+
+# --- test suite ---
+test_quartet:          dirs bin/test_quartet_index
+test_spherical:        dirs bin/test_spherical
+test_delta_e:          dirs bin/test_delta_e
+test_inf_temp:         dirs bin/test_inf_temp
+test_detailed_balance: dirs bin/test_detailed_balance
+test_fmc_mask:         dirs bin/test_fmc_mask
+test_replica_exchange: dirs bin/test_replica_exchange
+test_sparse_dense:     dirs bin/test_sparse_dense
+test_mean_shift:       dirs bin/test_mean_shift
+
+tests: test_quartet test_spherical test_delta_e test_inf_temp test_detailed_balance \
+       test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift
+	@echo "All test binaries built."
 
 dirs:
 	@mkdir -p bin obj
@@ -56,6 +74,38 @@ bin/parallel_tempering_sparse: obj/parallel_tempering_sparse.o $(LIB_SPARSE_OBJ)
 bin/benchmark: obj/benchmark.o $(LIB_OBJ) | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
+bin/smoothed_cube: obj/smoothed_cube.o obj/spins_sparse.o | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+# --- test suite binaries ---
+
+bin/test_quartet_index: obj/test_quartet_index.o | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_spherical: obj/test_spherical.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_delta_e: obj/test_delta_e.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_inf_temp: obj/test_inf_temp.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_detailed_balance: obj/test_detailed_balance.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_fmc_mask: obj/test_fmc_mask.o obj/disorder.o | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_replica_exchange: obj/test_replica_exchange.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_sparse_dense: obj/test_sparse_dense.o $(LIB_SPARSE_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_mean_shift: obj/test_mean_shift.o obj/disorder.o | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
 # --- C++ analysis ---
 
 bin/analysis: src/analysis.cpp | dirs
@@ -65,7 +115,7 @@ bin/analysis_sa: src/analysis_sa.cpp | dirs
 	$(CXX) $(CXFLAGS) -o $@ $< -lm
 
 bin/analysis_pt: src/analysis_pt.cpp | dirs
-	$(CXX) $(CXFLAGS) -o $@ $< -lm
+	$(CXX) $(CXFLAGS) -o $@ $< -lm -lpthread
 
 bin/plot_benchmark: src/plot_benchmark.cpp | dirs
 	$(CXX) $(CXFLAGS) -o $@ $< -lm

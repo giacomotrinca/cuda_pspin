@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
 
     // --- GPU memory check ---
     long long mem_g2    = (long long)cfg.N * cfg.N * sizeof(cuDoubleComplex);
-    long long mem_g4    = n_g4_total(cfg.N) * sizeof(cuDoubleComplex);
+    long long mem_g4    = n_quartets(cfg.N) * (sizeof(cuDoubleComplex) + sizeof(uint8_t));
     long long mem_spins = (long long)total_replicas * cfg.N * sizeof(cuDoubleComplex);
     long long mem_rng   = (long long)total_replicas * 64;
     long long mem_aux   = (long long)total_replicas * (sizeof(double) * 2 + 2 * sizeof(long long));
@@ -187,6 +187,11 @@ int main(int argc, char** argv) {
         printf("  %-22s %d\n", "save_freq", cfg.save_freq);
         printf("  %-22s %llu\n", "seed", (unsigned long long)cfg.seed);
         printf("  %-22s %.4f\n", "J", cfg.J);
+        printf("  %-22s %.4f\n", "J0", cfg.J0);
+        printf("  %-22s %.4f\n", "alpha", cfg.alpha);
+        printf("  %-22s %.4f\n", "alpha0", cfg.alpha0);
+        printf("  %-22s %.4f  (J2=(1-a)*J)\n", "J2", (1.0 - cfg.alpha) * cfg.J);
+        printf("  %-22s %.4f  (J4=a*J)\n", "J4", cfg.alpha * cfg.J);
         if (cfg.fmc_mode > 0) {
             const char* fmc_names[] = {"FC", "comb", "uniform"};
             printf("  %-22s %s (gamma=%.6f)\n", "FMC", fmc_names[cfg.fmc_mode], cfg.gamma);
@@ -209,7 +214,7 @@ int main(int argc, char** argv) {
         printf("  %-22s %s (gamma=%.6f)  pairs=%lld/%lld  quartets=%lld/%lld\n",
                "FMC active", fmc_names[cfg.fmc_mode], cfg.gamma,
                state.n_pairs_active, n_pairs(cfg.N),
-               state.n_quart_active, n_quartets(cfg.N));
+               state.n_quart_active, n_g4_total(cfg.N));
         char freqfile[256];
         snprintf(freqfile, sizeof(freqfile), "%s/frequencies.txt", datadir);
         FILE* ff = fopen(freqfile, "w");
@@ -382,11 +387,18 @@ int main(int argc, char** argv) {
                 double ex_hot  = (t_hot < NT - 1 && ex_prop_total[t_hot] > 0)
                     ? (double)ex_acc_total[t_hot] / ex_prop_total[t_hot] : 0.0;
 
-                printf("  %6d  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e\n",
+                struct timespec t_now;
+                clock_gettime(CLOCK_MONOTONIC, &t_now);
+                double elapsed_now = (t_now.tv_sec - t_start.tv_sec)
+                                   + (t_now.tv_nsec - t_start.tv_nsec) * 1e-9;
+                double avg_s_per_it = elapsed_now / (s + 1);
+
+                printf("  %6d  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e  [%.2e s/it]\n",
                        s + 1,
                        t_cold, h_energies[phys_cold] / cfg.N, ex_cold,
                        t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,
-                       t_hot,  h_energies[phys_hot]  / cfg.N, ex_hot);
+                       t_hot,  h_energies[phys_hot]  / cfg.N, ex_hot,
+                       avg_s_per_it);
             } else if (cfg.verbose == 1) {
                 // Compact: one line with energy at coldest T
                 int phys_cold = perm[(NT - 1) * nrep_per_temp];

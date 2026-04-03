@@ -33,7 +33,8 @@ static long long estimate_gpu_bytes(int N, int nrep) {
     long long nq = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
     long long bytes = 0;
     bytes += (long long)N * N * 16;       // d_g2
-    bytes += nq * 16;                     // d_g4
+    bytes += nq * 16;                     // d_g4  (cuDoubleComplex)
+    bytes += nq * 1;                      // d_g4_mask (uint8_t)
     bytes += (long long)nrep * N * 16;    // d_spins
     bytes += (long long)nrep * 64;        // d_rng (Philox state)
     bytes += (long long)nrep * 8;         // d_energies

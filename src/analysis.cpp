@@ -199,7 +199,7 @@ static void mkdir_p(const char* path) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>] [--plot]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>] [-nbins_spec <B>] [--plot]\n", prog);
     fprintf(stderr, "  Without -label: averages over all samples S0, S1, ...\n");
     fprintf(stderr, "  With -label L:  analyzes single sample SL only\n");
     fprintf(stderr, "  -T: simulation temperature (default 1.0, used for spectrum output)\n");
@@ -296,6 +296,7 @@ int main(int argc, char** argv) {
     int N = 0;
     int nrep = 1;
     int label = -1;
+    int nbins_spec = 0;
     double T_sim = 1.0;
     std::string datadir_override;
     bool do_plot = false;
@@ -311,11 +312,14 @@ int main(int argc, char** argv) {
             datadir_override = argv[++i];
         else if (strcmp(argv[i], "-T") == 0 && i + 1 < argc)
             T_sim = atof(argv[++i]);
+        else if (strcmp(argv[i], "-nbins_spec") == 0 && i + 1 < argc)
+            nbins_spec = atoi(argv[++i]);
         else if (strcmp(argv[i], "--plot") == 0)
             do_plot = true;
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);
+    if (nbins_spec <= 0) nbins_spec = N;
 
     // ================================================================
     // Single-sample mode: -label given or -datadir given
@@ -641,18 +645,23 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
-    // Intensity Spectrum
+    // Intensity Spectrum (rebinned)
     // ================================================================
     {
-        // Read frequencies from first valid sample
-        char refdir[256];
-        snprintf(refdir, sizeof(refdir), "data/N%d_NR%d_S%d",
-                 N, nrep, labels_valid[0]);
-        auto omega = read_frequencies(refdir, N);
+        printf("\n── Intensity spectrum (nbins_spec=%d) ──────────────\n", nbins_spec);
 
-        // Per-sample mean spectrum
-        // spec_s[s][k] = <I_k> averaged over (replica, iteration) configs
-        std::vector<std::vector<double>> spec_s(S, std::vector<double>(N, 0.0));
+        // Read per-sample frequencies
+        std::vector<std::vector<double>> omega_s(S);
+        for (int s = 0; s < S; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/N%d_NR%d_S%d",
+                     N, nrep, labels_valid[s]);
+            omega_s[s] = read_frequencies(sdir, N);
+        }
+
+        // Rebinned spectrum: spec_bin_s[s][b]
+        double dw = 1.0 / nbins_spec;
+        std::vector<std::vector<double>> spec_bin_s(S, std::vector<double>(nbins_spec, 0.0));
 
         for (int s = 0; s < S; s++) {
             char sdir[256];
@@ -662,20 +671,25 @@ int main(int argc, char** argv) {
             snprintf(confdir, sizeof(confdir), "%s/configs", sdir);
 
             int nconfigs = 0;
+            std::vector<double> bin_acc(nbins_spec, 0.0);
             for (int r = 0; r < nrep; r++) {
                 auto cfiles = find_configs_mc(confdir, r);
                 for (auto& cf : cfiles) {
                     std::vector<double> Ik;
                     if (read_config_intensities(cf.c_str(), N, Ik)) {
-                        for (int k = 0; k < N; k++)
-                            spec_s[s][k] += Ik[k];
+                        for (int k = 0; k < N; k++) {
+                            int b = (int)(omega_s[s][k] / dw);
+                            if (b < 0) b = 0;
+                            if (b >= nbins_spec) b = nbins_spec - 1;
+                            bin_acc[b] += Ik[k];
+                        }
                         nconfigs++;
                     }
                 }
             }
             if (nconfigs > 0) {
-                for (int k = 0; k < N; k++)
-                    spec_s[s][k] /= nconfigs;
+                for (int b = 0; b < nbins_spec; b++)
+                    spec_bin_s[s][b] = bin_acc[b] / nconfigs;
             }
             printf("  Sample S%d: spectrum computed (%d configs)\n",
                    labels_valid[s], nconfigs);
@@ -691,22 +705,18 @@ int main(int argc, char** argv) {
         snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
         FILE* fsp = fopen(specfile, "w");
         if (fsp) {
-            fprintf(fsp, "# Intensity spectrum: I_k = |a_k|^2 / sum_j |a_j|^2\n");
-            fprintf(fsp, "# N=%d nrep=%d nsamples=%d T=%.8f\n", N, nrep, S, T_sim);
-            fprintf(fsp, "# Columns: frequency  Intensity  Error_jk  Temperature\n");
-
-            // Sort index by frequency
-            std::vector<int> order(N);
-            for (int k = 0; k < N; k++) order[k] = k;
-            std::sort(order.begin(), order.end(),
-                      [&](int a, int b) { return omega[a] < omega[b]; });
+            fprintf(fsp, "# Rebinned intensity spectrum: I(omega) on uniform grid [0,1]\n");
+            fprintf(fsp, "# N=%d nrep=%d nsamples=%d T=%.8f nbins_spec=%d\n",
+                    N, nrep, S, T_sim, nbins_spec);
+            fprintf(fsp, "# Columns: omega_center  Intensity  Error_jk  Temperature\n");
 
             fprintf(fsp, "\n");
-            for (int ik = 0; ik < N; ik++) {
-                int k = order[ik];
+            for (int b = 0; b < nbins_spec; b++) {
+                double wc = (b + 0.5) * dw;
+
                 double fI = 0;
                 for (int s = 0; s < S; s++)
-                    fI += spec_s[s][k];
+                    fI += spec_bin_s[s][b];
                 fI /= S;
 
                 double jI = 0;
@@ -714,7 +724,7 @@ int main(int argc, char** argv) {
                     double lI = 0;
                     for (int s = 0; s < S; s++) {
                         if (s == j) continue;
-                        lI += spec_s[s][k];
+                        lI += spec_bin_s[s][b];
                     }
                     lI /= (S - 1);
                     jI += (lI - fI) * (lI - fI);
@@ -722,7 +732,7 @@ int main(int argc, char** argv) {
                 jI = sqrt((S - 1.0) / S * jI);
 
                 fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n",
-                        omega[k], fI, jI, T_sim);
+                        wc, fI, jI, T_sim);
             }
             fclose(fsp);
             printf("  Written %s\n", specfile);
@@ -739,7 +749,7 @@ int main(int argc, char** argv) {
         char outdir[256];
         snprintf(outdir, sizeof(outdir), "analysis/MC_N%d_NR%d", N, nrep);
 
-        char plotdir[512];
+        char plotdir[384];
         snprintf(plotdir, sizeof(plotdir), "%s/plots", outdir);
         mkdir_p(plotdir);
 

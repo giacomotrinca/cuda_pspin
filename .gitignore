@@ -1,4 +1,5 @@
 bin/
+obj/
 *.o
 *.d
 *.out
@@ -12,3 +13,4 @@ data/
 *.pdf
 .vscode/
 include/sciplot/
+README.md

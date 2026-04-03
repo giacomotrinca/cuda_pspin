@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <algorithm>
 #include <curand_kernel.h>
 
@@ -149,10 +150,8 @@ __global__ void mc_sparse_sweep_kernel(
             for (int k = tid; k < N; k += bdim) {
                 if (k != i0 && k != j0) {
                     cuDoubleComplex ak_c = cuConj(s_spins[k]);
-                    int ri = (i0 < k) ? i0 : k, ci = (i0 < k) ? k : i0;
-                    sum_i = cuCadd(sum_i, cuCmul(g2[ri * N + ci], ak_c));
-                    int rj = (j0 < k) ? j0 : k, cj = (j0 < k) ? k : j0;
-                    sum_j = cuCadd(sum_j, cuCmul(g2[rj * N + cj], ak_c));
+                    sum_i = cuCadd(sum_i, cuCmul(g2[i0 * N + k], ak_c));
+                    sum_j = cuCadd(sum_j, cuCmul(g2[j0 * N + k], ak_c));
                 }
             }
             local_dE -= cuCreal(cuCmul(delta_i, sum_i));
@@ -406,16 +405,24 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
     CUDA_CHECK(cudaMalloc(&state.d_g2, (long long)N * N * sizeof(cuDoubleComplex)));
     CUDA_CHECK(cudaMemset(state.d_g2, 0, (long long)N * N * sizeof(cuDoubleComplex)));
 
-    // ---- Temporary dense G4 for FMC filtering ----
+    // ---- Temporary dense G4 + mask for FMC filtering ----
     long long nq     = n_quartets(N);
-    long long nq_tot = n_g4_total(N);
     cuDoubleComplex* d_g4_tmp;
-    CUDA_CHECK(cudaMalloc(&d_g4_tmp, nq_tot * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_g4_tmp, nq * sizeof(cuDoubleComplex)));
+    uint8_t* d_g4_mask_tmp;
+    CUDA_CHECK(cudaMalloc(&d_g4_mask_tmp, nq * sizeof(uint8_t)));
+
+    // Compute effective coupling scales from alpha parametrization
+    double J2   = (1.0 - cfg.alpha)  * cfg.J;
+    double J4   = cfg.alpha           * cfg.J;
+    double J2_0 = (1.0 - cfg.alpha0) * cfg.J0;
+    double J4_0 = cfg.alpha0          * cfg.J0;
 
     // Generate disorder
     if (cfg.fmc_mode != 1)
-        generate_g2(state.d_g2, N, cfg.J, cfg.seed + 1000);
-    generate_g4(d_g4_tmp, N, cfg.J, cfg.seed + 2000);
+        generate_g2(state.d_g2, N, J2, cfg.seed + 1000);
+    generate_g4(d_g4_tmp, N, J4, cfg.seed + 2000);
+    init_g4_mask(d_g4_mask_tmp, N);
 
     // ---- FMC filtering ----
     if (cfg.fmc_mode > 0) {
@@ -451,7 +458,7 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
             delete[] h_g2;
         }
 
-        apply_fmc_g4(d_g4_tmp, N, d_omega, cfg.gamma);
+        apply_fmc_g4(d_g4_mask_tmp, N, d_omega, cfg.gamma);
         CUDA_CHECK(cudaFree(d_omega));
     } else {
         state.h_omega = nullptr;
@@ -459,21 +466,38 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
     }
 
     // Rescale g2 (same normalization as spherical code)
-    rescale_g2(state.d_g2, N, cfg.J, state.n_pairs_active);
+    rescale_g2(state.d_g2, N, J2, state.n_pairs_active);
+    // Add g2 mean shift
+    if (J2_0 != 0.0 && state.n_pairs_active > 0) {
+        double mean_g2 = J2_0 * (double)N / (double)state.n_pairs_active;
+        shift_mean_couplings(state.d_g2, (long long)N * N, mean_g2);
+    }
     state.h2_active = (state.n_pairs_active > 0) ? 1 : 0;
 
     // ---- Sparse H4 sampling ----
-    cuDoubleComplex* h_g4 = new cuDoubleComplex[nq_tot];
-    CUDA_CHECK(cudaMemcpy(h_g4, d_g4_tmp, nq_tot * sizeof(cuDoubleComplex),
+    // Copy g4 couplings and mask to host
+    cuDoubleComplex* h_g4 = new cuDoubleComplex[nq];
+    CUDA_CHECK(cudaMemcpy(h_g4, d_g4_tmp, nq * sizeof(cuDoubleComplex),
                           cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_g4_tmp));  // temporary dense g4 freed
 
-    // Collect non-zero entry indices
+    uint8_t* h_mask = new uint8_t[nq];
+    CUDA_CHECK(cudaMemcpy(h_mask, d_g4_mask_tmp, nq * sizeof(uint8_t),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_g4_mask_tmp));  // temporary mask freed
+
+    // Collect non-zero entry indices as (q, ch) pairs encoded as q*3+ch
+    // Each active (quartet, channel) pair is a potential sparse entry.
+    long long nq_tot = n_g4_total(N);  // 3 * C(N,4) — max possible
     long long* nonzero_idx = new long long[nq_tot];
     long long n_nonzero = 0;
-    for (long long idx = 0; idx < nq_tot; idx++)
-        if (h_g4[idx].x != 0.0 || h_g4[idx].y != 0.0)
-            nonzero_idx[n_nonzero++] = idx;
+    for (long long q = 0; q < nq; q++) {
+        if (h_g4[q].x == 0.0 && h_g4[q].y == 0.0) continue;
+        uint8_t m = h_mask[q];
+        for (int ch = 0; ch < 3; ch++)
+            if (m & (1 << ch))
+                nonzero_idx[n_nonzero++] = q * 3 + ch;
+    }
 
     state.n_quart_active = n_nonzero;
 
@@ -490,17 +514,15 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
     state.n_quartets = n_sparse_quartets;
     SparseQuartet* h_sq = new SparseQuartet[n_sparse_quartets];
 
-    // Coupling variance: sigma = J * sqrt(N / n_selected)
-    double sigma = cfg.J * sqrt((double)N / (double)n_sparse_quartets);
+    // Coupling variance: sigma = J4 * sqrt(N / n_selected)
+    double sigma = J4 * sqrt((double)N / (double)n_sparse_quartets);
+    // Coupling mean shift for g4
+    double mean_g4 = (J4_0 != 0.0) ? J4_0 * (double)N / (double)n_sparse_quartets : 0.0;
 
-    long long nq_per_ch = nq;
     for (int s = 0; s < n_sparse_quartets; s++) {
-        long long idx = nonzero_idx[s];
-        int ch;
-        long long q;
-        if      (idx < nq_per_ch)     { ch = 0; q = idx; }
-        else if (idx < 2 * nq_per_ch) { ch = 1; q = idx - nq_per_ch; }
-        else                          { ch = 2; q = idx - 2 * nq_per_ch; }
+        long long encoded = nonzero_idx[s];
+        int ch     = (int)(encoded % 3);
+        long long q = encoded / 3;
 
         int ii, jj, kk, ll;
         decode_quartet_index(q, &ii, &jj, &kk, &ll);
@@ -510,11 +532,12 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
         h_sq[s].k  = kk;
         h_sq[s].l  = ll;
         h_sq[s].ch = ch;
-        // Coupling: original unit-variance value * sigma
-        h_sq[s].g  = make_cuDoubleComplex(cuCreal(h_g4[idx]) * sigma, 0.0);
+        // Coupling: original unit-variance value * sigma + mean
+        h_sq[s].g  = make_cuDoubleComplex(cuCreal(h_g4[q]) * sigma + mean_g4, 0.0);
     }
 
     delete[] h_g4;
+    delete[] h_mask;
     delete[] nonzero_idx;
 
     // Copy sparse quartets to device

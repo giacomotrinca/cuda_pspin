@@ -2,6 +2,7 @@
 #include <curand.h>
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
 
 #define CUDA_CHECK(call) \
     do { \
@@ -41,6 +42,19 @@ __global__ void zero_imag_kernel(cuDoubleComplex* couplings, long long n) {
     }
 }
 
+// Kernel to symmetrize g2: copy upper triangle to lower, zero diagonal
+__global__ void symmetrize_g2_kernel(cuDoubleComplex* g2, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N * N) return;
+    int i = idx / N;
+    int j = idx % N;
+    if (i == j) {
+        g2[idx] = make_cuDoubleComplex(0.0, 0.0);
+    } else if (i > j) {
+        g2[i * N + j] = g2[j * N + i];
+    }
+}
+
 void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed) {
     long long n = (long long)N * N;
 
@@ -60,6 +74,10 @@ void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed
     // Zero out imaginary parts: g2 are real
     zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g2, n);
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Symmetrize: g2[j*N+i] = g2[i*N+j], zero diagonal (no self-interaction)
+    symmetrize_g2_kernel<<<(int)grid_size, block_size>>>(d_g2, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void rescale_g2(cuDoubleComplex* d_g2, int N, double J, long long n_surviving) {
@@ -74,35 +92,35 @@ void rescale_g2(cuDoubleComplex* d_g2, int N, double J, long long n_surviving) {
 }
 
 void generate_g4(cuDoubleComplex* d_g4, int N, double J, unsigned long long seed) {
-    long long ntot = n_g4_total(N);  // 3 * C(N,4)
+    long long nq   = n_quartets(N);   // C(N,4)
 
+    // Generate a single coupling per quartet (symmetric tensor: g_{ijkl}
+    // is the same regardless of which indices are conjugated).
     curandGenerator_t gen;
     CURAND_CHECK(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
     CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(gen, seed + 12345));
 
     double* d_raw = reinterpret_cast<double*>(d_g4);
-    // Need 2*ntot doubles; pad to even if necessary
-    long long count = 2 * ntot;
+    long long count = 2 * nq;
     if (count % 2 != 0) count++;
     CURAND_CHECK(curandGenerateNormalDouble(gen, d_raw, count, 0.0, 1.0));
     CURAND_CHECK(curandDestroyGenerator(gen));
 
-    // Generate with unit variance; actual scaling deferred until after FMC filter
     int block_size = 256;
-    long long grid_size = (ntot + block_size - 1) / block_size;
+    long long grid_size = (nq + block_size - 1) / block_size;
     // Zero out imaginary parts: g4 are real
-    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g4, ntot);
+    zero_imag_kernel<<<(int)grid_size, block_size>>>(d_g4, nq);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void rescale_g4(cuDoubleComplex* d_g4, int N, double J, long long n_surviving) {
     if (n_surviving <= 0) return;  // all couplings zeroed by FMC, nothing to rescale
-    long long ntot = n_g4_total(N);  // 3 * C(N,4)
-    // Var(g4) = J^2 * N / n_surviving (total across all 3 channels)
+    long long nq = n_quartets(N);  // C(N,4)
+    // Var(g4) = J^2 * N / n_surviving (n_surviving = total active quartet-channel pairs)
     double sigma = J * sqrt((double)N / (double)n_surviving);
     int block_size = 256;
-    long long grid_size = (ntot + block_size - 1) / block_size;
-    scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g4, ntot, sigma);
+    long long grid_size = (nq + block_size - 1) / block_size;
+    scale_couplings_kernel<<<(int)grid_size, block_size>>>(d_g4, nq, sigma);
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
@@ -120,28 +138,22 @@ __global__ void fmc_filter_g2_kernel(cuDoubleComplex* g2, const double* omega,
         double dw = fabs(omega[i] - omega[j]);
         if (dw > gamma) {
             g2[i * N + j] = make_cuDoubleComplex(0.0, 0.0);
+            g2[j * N + i] = make_cuDoubleComplex(0.0, 0.0);
         }
     }
 }
 
-// 3-channel FMC filter: processes 3*C(N,4) entries.
-// Layout: [ch0: C(N,4) | ch1: C(N,4) | ch2: C(N,4)]
+// 3-channel FMC mask filter: processes C(N,4) quartets.
+// For each quartet, clears the mask bit of channels whose FMC condition
+// is not satisfied, leaving the coupling array untouched.
 // Channel-dependent conservation conditions (sorted ii<jj<kk<ll):
 //   ch 0: |w_ii+w_jj - w_kk-w_ll| <= gamma
 //   ch 1: |w_ii+w_ll - w_jj-w_kk| <= gamma
 //   ch 2: |w_ii+w_kk - w_jj-w_ll| <= gamma
-__global__ void fmc_filter_g4_kernel(cuDoubleComplex* g4, const double* omega,
-                                     int N, double gamma, long long nq_per_ch) {
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long nq_total = 3 * nq_per_ch;
-    if (idx >= nq_total) return;
-
-    // Determine channel and quartet index
-    int ch;
-    long long q;
-    if (idx < nq_per_ch)          { ch = 0; q = idx; }
-    else if (idx < 2 * nq_per_ch) { ch = 1; q = idx - nq_per_ch; }
-    else                          { ch = 2; q = idx - 2 * nq_per_ch; }
+__global__ void fmc_filter_g4_mask_kernel(uint8_t* mask, const double* omega,
+                                          int N, double gamma, long long nq) {
+    long long q = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= nq) return;
 
     // Decode combinatorial index to sorted (ii, jj, kk, ll) with ii < jj < kk < ll
     int ll = 3;
@@ -158,15 +170,25 @@ __global__ void fmc_filter_g4_kernel(cuDoubleComplex* g4, const double* omega,
     rem -= (long long)jj * (jj - 1) / 2;
     int ii = (int)rem;
 
-    // FMC condition depends on channel
-    double dw;
-    if (ch == 0)      dw = fabs(omega[ii] + omega[jj] - omega[kk] - omega[ll]);
-    else if (ch == 1) dw = fabs(omega[ii] + omega[ll] - omega[jj] - omega[kk]);
-    else              dw = fabs(omega[ii] + omega[kk] - omega[jj] - omega[ll]);
+    uint8_t m = mask[q];
 
-    if (dw > gamma) {
-        g4[idx] = make_cuDoubleComplex(0.0, 0.0);
-    }
+    // ch 0: |w_ii + w_jj - w_kk - w_ll|
+    if (fabs(omega[ii] + omega[jj] - omega[kk] - omega[ll]) > gamma)
+        m &= ~(1u << 0);
+    // ch 1: |w_ii + w_ll - w_jj - w_kk|
+    if (fabs(omega[ii] + omega[ll] - omega[jj] - omega[kk]) > gamma)
+        m &= ~(1u << 1);
+    // ch 2: |w_ii + w_kk - w_jj - w_ll|
+    if (fabs(omega[ii] + omega[kk] - omega[jj] - omega[ll]) > gamma)
+        m &= ~(1u << 2);
+
+    mask[q] = m;
+}
+
+// Kernel: set all mask entries to 0x7 (all 3 channels active)
+__global__ void init_g4_mask_kernel(uint8_t* mask, long long nq) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < nq) mask[idx] = 0x7;
 }
 
 void apply_fmc_g2(cuDoubleComplex* d_g2, int N, const double* d_omega, double gamma) {
@@ -177,11 +199,48 @@ void apply_fmc_g2(cuDoubleComplex* d_g2, int N, const double* d_omega, double ga
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-void apply_fmc_g4(cuDoubleComplex* d_g4, int N, const double* d_omega, double gamma) {
-    long long nq_per_ch = n_quartets(N);
-    long long ntot = 3 * nq_per_ch;
+// Kernel: shift real part of non-zero entries by +mean
+__global__ void shift_mean_kernel(cuDoubleComplex* c, long long n, double mean) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        double re = cuCreal(c[idx]);
+        double im = cuCimag(c[idx]);
+        if (re != 0.0 || im != 0.0)
+            c[idx] = make_cuDoubleComplex(re + mean, im);
+    }
+}
+
+void shift_mean_couplings(cuDoubleComplex* d_c, long long n, double mean) {
+    if (n <= 0 || mean == 0.0) return;
     int block_size = 256;
-    long long grid_size = (ntot + block_size - 1) / block_size;
-    fmc_filter_g4_kernel<<<(int)grid_size, block_size>>>(d_g4, d_omega, N, gamma, nq_per_ch);
+    long long grid_size = (n + block_size - 1) / block_size;
+    shift_mean_kernel<<<(int)grid_size, block_size>>>(d_c, n, mean);
     CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void init_g4_mask(uint8_t* d_mask, int N) {
+    long long nq = n_quartets(N);
+    int block_size = 256;
+    long long grid_size = (nq + block_size - 1) / block_size;
+    init_g4_mask_kernel<<<(int)grid_size, block_size>>>(d_mask, nq);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void apply_fmc_g4(uint8_t* d_mask, int N, const double* d_omega, double gamma) {
+    long long nq = n_quartets(N);
+    int block_size = 256;
+    long long grid_size = (nq + block_size - 1) / block_size;
+    fmc_filter_g4_mask_kernel<<<(int)grid_size, block_size>>>(d_mask, d_omega, N, gamma, nq);
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+long long count_active_g4(const uint8_t* d_mask, int N) {
+    long long nq = n_quartets(N);
+    uint8_t* h_mask = new uint8_t[nq];
+    CUDA_CHECK(cudaMemcpy(h_mask, d_mask, nq * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    long long count = 0;
+    for (long long q = 0; q < nq; q++)
+        count += __builtin_popcount(h_mask[q]);
+    delete[] h_mask;
+    return count;
 }

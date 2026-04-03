@@ -7,6 +7,9 @@ NT=20
 NREP=4
 NBINS=80
 NTHREADS=$(nproc)
+SPARSE=0
+COMPRESS=0
+LOG_TEMP=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -15,6 +18,9 @@ for arg in "$@"; do
         --nrep=*)     NREP="${arg#*=}" ;;
         --nbins=*)    NBINS="${arg#*=}" ;;
         --nthreads=*) NTHREADS="${arg#*=}" ;;
+        --sparse)     SPARSE=1 ;;
+        --log-temp)   LOG_TEMP=1 ;;
+        --compress)   COMPRESS=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N      Number of spins (default: $SIZE)"
@@ -22,6 +28,9 @@ for arg in "$@"; do
             echo "  --nrep=R      Number of replicas per temperature (default: $NREP)"
             echo "  --nbins=B     Number of bins for overlap histogram (default: $NBINS)"
             echo "  --nthreads=T  Threads for overlap computation (default: $(nproc))"
+            echo "  --sparse      Analyze sparse (PTS) data instead of standard (PT)"
+            echo "  --log-temp    Use log scale for temperature axes and colorbars"
+            echo "  --compress    Decompress before analysis, re-compress after"
             exit 0
             ;;
         *)
@@ -31,4 +40,38 @@ for arg in "$@"; do
     esac
 done
 
-./bin/analysis_pt -N "$SIZE" -NT "$NT" -nrep "$NREP" -nbins "$NBINS" -nthreads "$NTHREADS" --plot
+if [ "$SPARSE" -eq 1 ]; then
+    PREFIX="PTS"
+else
+    PREFIX="PT"
+fi
+
+# Decompress .xz files in data directories if --compress
+if [ "$COMPRESS" -eq 1 ]; then
+    for d in data/${PREFIX}_N${SIZE}_NT${NT}_NR${NREP}_S*/; do
+        [ -d "$d" ] || continue
+        xzcount=$(find "$d" -name '*.xz' 2>/dev/null | head -1)
+        if [ -n "$xzcount" ]; then
+            echo "  Decompressing $d ..."
+            find "$d" -name '*.xz' -exec xz -d {} +
+        fi
+    done
+fi
+
+CMD="./bin/analysis_pt -N $SIZE -NT $NT -nrep $NREP -nbins $NBINS -nthreads $NTHREADS --plot"
+if [ "$SPARSE" -eq 1 ]; then
+    CMD="$CMD --sparse"
+fi
+if [ "$LOG_TEMP" -eq 1 ]; then
+    CMD="$CMD --log-temp"
+fi
+$CMD
+
+# Re-compress if --compress
+if [ "$COMPRESS" -eq 1 ]; then
+    for d in data/${PREFIX}_N${SIZE}_NT${NT}_NR${NREP}_S*/; do
+        [ -d "$d" ] || continue
+        echo "  Re-compressing $d ..."
+        find "$d" \( -name '*.bin' -o -name '*.txt' \) ! -name '*.xz' -exec xz -9 {} +
+    done
+fi

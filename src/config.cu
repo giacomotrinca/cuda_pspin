@@ -15,6 +15,12 @@ SimConfig parse_args(int argc, char** argv) {
             cfg.T = atof(argv[++i]);
         else if (strcmp(argv[i], "-J") == 0 && i + 1 < argc)
             cfg.J = atof(argv[++i]);
+        else if (strcmp(argv[i], "-J0") == 0 && i + 1 < argc)
+            cfg.J0 = atof(argv[++i]);
+        else if (strcmp(argv[i], "-alpha") == 0 && i + 1 < argc)
+            cfg.alpha = atof(argv[++i]);
+        else if (strcmp(argv[i], "-alpha0") == 0 && i + 1 < argc)
+            cfg.alpha0 = atof(argv[++i]);
         else if (strcmp(argv[i], "-iter") == 0 && i + 1 < argc)
             cfg.mc_iterations = atoi(argv[++i]);
         else if (strcmp(argv[i], "-seed") == 0 && i + 1 < argc)
@@ -39,6 +45,7 @@ SimConfig parse_args(int argc, char** argv) {
         else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             fprintf(stderr, "Usage: %s [-N n] [-nrep n] [-T temp] [-J coupling] "
+                    "[-J0 mean] [-alpha a] [-alpha0 a0] "
                     "[-iter n] [-seed s] [-save_freq k] [-label l] [-dev d] "
                     "[-fmc 0|1|2] [-gamma g] [-verbose [0|1|2]]\n",
                     argv[0]);

@@ -233,25 +233,32 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [--plot]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-nbins_spec <B>] [--plot] [--log-temp]\n", prog);
     exit(1);
 }
 
 int main(int argc, char** argv) {
     int N = 0;
     int nrep = 1;
+    int nbins_spec = 0;
     bool do_plot = false;
+    bool log_temp = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-N") == 0 && i + 1 < argc)
             N = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nrep") == 0 && i + 1 < argc)
             nrep = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-nbins_spec") == 0 && i + 1 < argc)
+            nbins_spec = atoi(argv[++i]);
         else if (strcmp(argv[i], "--plot") == 0)
             do_plot = true;
+        else if (strcmp(argv[i], "--log-temp") == 0)
+            log_temp = true;
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);
+    if (nbins_spec <= 0) nbins_spec = N;
 
     // Find samples
     auto labels = find_samples(N, nrep);
@@ -568,17 +575,22 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
-    // Intensity Spectrum
+    // Intensity Spectrum (rebinned)
     // ================================================================
     {
-        // Read frequencies from reference sample
-        char refdir[256];
-        snprintf(refdir, sizeof(refdir), "data/SA_N%d_NR%d_S%d", N, nrep, labels[ref]);
-        auto omega = read_frequencies(refdir, N);
+        printf("\n── Intensity spectrum (nbins_spec=%d) ──────────────\n", nbins_spec);
 
-        // Per-sample, per-temperature mean spectrum
-        // spec_s[s][ti][k] = <I_k> averaged over replicas for sample s at temp ti
-        std::vector<std::vector<std::vector<double>>> spec_s(nsamples);
+        // Read per-sample frequencies
+        std::vector<std::vector<double>> omega_s(nsamples);
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/SA_N%d_NR%d_S%d", N, nrep, labels[s]);
+            omega_s[s] = read_frequencies(sdir, N);
+        }
+
+        // Rebinned spectrum: spec_bin_s[s][ti][b]
+        double dw = 1.0 / nbins_spec;
+        std::vector<std::vector<std::vector<double>>> spec_bin_s(nsamples);
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
@@ -586,28 +598,33 @@ int main(int argc, char** argv) {
             char confdir[512];
             snprintf(confdir, sizeof(confdir), "%s/configs", sdir);
 
-            spec_s[s].resize(ntemps, std::vector<double>(N, 0.0));
+            spec_bin_s[s].resize(ntemps, std::vector<double>(nbins_spec, 0.0));
 
             for (int ti = 0; ti < ntemps; ti++) {
                 double T = all_data[ref][ti].T;
                 int nconfigs = 0;
 
+                std::vector<double> bin_acc(nbins_spec, 0.0);
+
                 for (int r = 0; r < nrep; r++) {
-                    // SA config naming: conf_r{rep}_T{T:.6f}.bin
                     char conffile[768];
                     snprintf(conffile, sizeof(conffile),
                              "%s/conf_r%d_T%.6f.bin", confdir, r, T);
                     std::vector<double> Ik;
                     if (read_config_intensities(conffile, N, Ik)) {
-                        for (int k = 0; k < N; k++)
-                            spec_s[s][ti][k] += Ik[k];
+                        for (int k = 0; k < N; k++) {
+                            int b = (int)(omega_s[s][k] / dw);
+                            if (b < 0) b = 0;
+                            if (b >= nbins_spec) b = nbins_spec - 1;
+                            bin_acc[b] += Ik[k];
+                        }
                         nconfigs++;
                     }
                 }
 
                 if (nconfigs > 0) {
-                    for (int k = 0; k < N; k++)
-                        spec_s[s][ti][k] /= nconfigs;
+                    for (int b = 0; b < nbins_spec; b++)
+                        spec_bin_s[s][ti][b] = bin_acc[b] / nconfigs;
                 }
             }
             printf("  Sample S%d: spectrum computed\n", labels[s]);
@@ -618,26 +635,22 @@ int main(int argc, char** argv) {
         snprintf(specfile, sizeof(specfile), "%s/intensity_spectrum.dat", outdir);
         FILE* fsp = fopen(specfile, "w");
         if (fsp) {
-            fprintf(fsp, "# Intensity spectrum: I_k = |a_k|^2 / sum_j |a_j|^2\n");
-            fprintf(fsp, "# N=%d nrep=%d nsamples=%d\n", N, nrep, nsamples);
-            fprintf(fsp, "# Columns: frequency  Intensity  Error_jk  Temperature\n");
+            fprintf(fsp, "# Rebinned intensity spectrum: I(omega) on uniform grid [0,1]\n");
+            fprintf(fsp, "# N=%d nrep=%d nsamples=%d nbins_spec=%d\n",
+                    N, nrep, nsamples, nbins_spec);
+            fprintf(fsp, "# Columns: omega_center  Intensity  Error_jk  Temperature\n");
             fprintf(fsp, "# %d temperature blocks separated by blank lines\n", ntemps);
-
-            // Sort index by frequency
-            std::vector<int> order(N);
-            for (int k = 0; k < N; k++) order[k] = k;
-            std::sort(order.begin(), order.end(),
-                      [&](int a, int b) { return omega[a] < omega[b]; });
 
             for (int ti = 0; ti < ntemps; ti++) {
                 double T = all_data[ref][ti].T;
                 fprintf(fsp, "\n");
 
-                for (int ik = 0; ik < N; ik++) {
-                    int k = order[ik];
+                for (int b = 0; b < nbins_spec; b++) {
+                    double wc = (b + 0.5) * dw;
+
                     double fI = 0;
                     for (int s = 0; s < nsamples; s++)
-                        fI += spec_s[s][ti][k];
+                        fI += spec_bin_s[s][ti][b];
                     fI /= nsamples;
 
                     double jI = 0;
@@ -645,15 +658,14 @@ int main(int argc, char** argv) {
                         double lI = 0;
                         for (int s = 0; s < nsamples; s++) {
                             if (s == j) continue;
-                            lI += spec_s[s][ti][k];
+                            lI += spec_bin_s[s][ti][b];
                         }
                         lI /= (nsamples - 1);
                         jI += (lI - fI) * (lI - fI);
                     }
                     jI = sqrt((nsamples - 1.0) / nsamples * jI);
 
-                    fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n",
-                            omega[k], fI, jI, T);
+                    fprintf(fsp, "%.12f\t%.8e\t%.8e\t%.8f\n", wc, fI, jI, T);
                 }
             }
             fclose(fsp);
@@ -668,7 +680,7 @@ int main(int argc, char** argv) {
         using namespace sciplot;
         printf("\n── Generating plots ────────────────────────────────\n");
 
-        char plotdir[512];
+        char plotdir[384];
         snprintf(plotdir, sizeof(plotdir), "%s/plots", outdir);
         mkdir_p(plotdir);
 
@@ -709,6 +721,7 @@ int main(int argc, char** argv) {
                     char cbr[128];
                     snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                     plot.gnuplot(cbr);
+                    if (log_temp) plot.gnuplot("set log cb");
                     plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
                     plot.gnuplot("set colorbox");
                     for (int bi = 0; bi < nb; bi++) {
@@ -716,7 +729,10 @@ int main(int argc, char** argv) {
                         int n = (int)bl.size();
                         std::vector<double> vx(n), vy(n);
                         for (int i = 0; i < n; i++) { vx[i] = bl[i].omega; vy[i] = bl[i].I; }
-                        double frac = (nb > 1) ? 1.0 - (double)bi / (nb - 1) : 0.5;
+                        double frac = (Tmax > Tmin)
+                            ? (log_temp ? (log(bl[0].T) - log(Tmin)) / (log(Tmax) - log(Tmin))
+                                        : (bl[0].T - Tmin) / (Tmax - Tmin))
+                            : 0.5;
                         plot.drawCurve(vx, vy)
                             .lineColor(temp_color(frac))
                             .lineWidth(2)
@@ -767,6 +783,7 @@ int main(int argc, char** argv) {
                         Plot2D plot;
                         plot.xlabel("{/Times-Italic T}"); plot.ylabel("{/Times-Italic E} / {/Times-Italic N}");
                         plot.fontName("Times"); plot.fontSize(18);
+                        // if (log_temp) plot.gnuplot("set logscale x");
                         plot.legend().atTopRight();
                         plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vElo, vEhi)
@@ -783,6 +800,7 @@ int main(int argc, char** argv) {
                         Plot2D plot;
                         plot.xlabel("{/Times-Italic T}"); plot.ylabel("MC acceptance");
                         plot.fontName("Times"); plot.fontSize(18);
+                        // if (log_temp) plot.gnuplot("set logscale x");
                         plot.legend().atTopRight();
                         plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vAlo, vAhi)
@@ -799,6 +817,7 @@ int main(int argc, char** argv) {
                         Plot2D plot;
                         plot.xlabel("{/Times-Italic T}"); plot.ylabel("{/Times-Italic C}_{/Times-Italic v}");
                         plot.fontName("Times"); plot.fontSize(18);
+                        // if (log_temp) plot.gnuplot("set logscale x");
                         plot.legend().atTopRight();
                         plot.gnuplot("set grid ls 0 lc rgb '#CCCCCC' lw 2.5 dt 2");
                         plot.drawCurvesFilled(vT, vCvlo, vCvhi)
@@ -861,6 +880,7 @@ int main(int argc, char** argv) {
                         char cbr[128];
                         snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
                         plot.gnuplot(cbr);
+                        if (log_temp) plot.gnuplot("set log cb");
                         plot.gnuplot("set cblabel '{/Times-Italic T}' font 'Times,16'");
                         plot.gnuplot("set colorbox");
 
@@ -873,7 +893,10 @@ int main(int argc, char** argv) {
                                 if (val_col == 0) vy[i] = bl[i].E;
                                 else vy[i] = bl[i].A;
                             }
-                            double frac = (Tmax > Tmin) ? (bl[0].T - Tmin) / (Tmax - Tmin) : 0.5;
+                            double frac = (Tmax > Tmin)
+                                ? (log_temp ? (log(bl[0].T) - log(Tmin)) / (log(Tmax) - log(Tmin))
+                                            : (bl[0].T - Tmin) / (Tmax - Tmin))
+                                : 0.5;
                             plot.drawCurve(vx, vy)
                                 .lineColor(temp_color(frac))
                                 .lineWidth(2)
