@@ -63,7 +63,7 @@ SimConfig parse_args(int argc, char** argv) {
         if (cfg.fmc_mode == 1)
             cfg.gamma = 0.0;           // comb: exact frequency matching
         else if (cfg.fmc_mode == 2)
-            cfg.gamma = 1.0 / (cfg.N - 1);  // uniform: 1 spacing
+            cfg.gamma = 1.0 / (2.0 * (cfg.N - 1));  // uniform: half spacing
     }
 
     return cfg;

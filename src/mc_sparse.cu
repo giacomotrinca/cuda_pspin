@@ -656,3 +656,101 @@ void mc_sparse_get_spins(const MCStateSparse& state, cuDoubleComplex* h_spins) {
                           (long long)state.nrep * state.N * sizeof(cuDoubleComplex),
                           cudaMemcpyDeviceToHost));
 }
+
+// ============================================================================
+// Split energy kernel (sparse H4): computes H2 and H4 separately
+// ============================================================================
+__global__ void split_energy_sparse_kernel(
+    const cuDoubleComplex* __restrict__ all_spins,
+    const cuDoubleComplex* __restrict__ g2,
+    const SparseQuartet*   __restrict__ quartets,
+    int n_quartets_total,
+    int N, int nrep,
+    double* energies_h2,
+    double* energies_h4,
+    int h2_active
+) {
+    int rep = blockIdx.y;
+    if (rep >= nrep) return;
+
+    extern __shared__ double sdata[];
+    int tid  = threadIdx.x;
+    int bdim = blockDim.x;
+    double* sdata_h2 = sdata;
+    double* sdata_h4 = sdata + bdim;
+
+    const cuDoubleComplex* spins = all_spins + (long long)rep * N;
+    double local_h2 = 0.0, local_h4 = 0.0;
+
+    // H2: dense
+    if (h2_active) {
+        long long total_pairs = (long long)N * (N - 1) / 2;
+        for (long long p = (long long)blockIdx.x * bdim + tid; p < total_pairs;
+             p += (long long)gridDim.x * bdim) {
+            int j = (int)(0.5 + sqrt(0.25 + 2.0 * p));
+            int i = (int)(p - (long long)j * (j - 1) / 2);
+            if (i >= j) { j++; i = (int)(p - (long long)j * (j - 1) / 2); }
+            cuDoubleComplex gij  = g2[i * N + j];
+            cuDoubleComplex prod = cuCmul(gij, cuCmul(spins[i], cuConj(spins[j])));
+            local_h2 += -cuCreal(prod);
+        }
+    }
+
+    // Sparse H4
+    for (int q = (int)((long long)blockIdx.x * bdim + tid); q < n_quartets_total;
+         q += (int)((long long)gridDim.x * bdim)) {
+        SparseQuartet sq = quartets[q];
+        cuDoubleComplex ai = spins[sq.i], aj = spins[sq.j];
+        cuDoubleComplex ak = spins[sq.k], al = spins[sq.l];
+
+        cuDoubleComplex s0, s1, s2, s3;
+        if (sq.ch == 0)      { s0 = ai; s1 = aj;         s2 = cuConj(ak); s3 = cuConj(al); }
+        else if (sq.ch == 1) { s0 = ai; s1 = cuConj(aj); s2 = cuConj(ak); s3 = al; }
+        else                 { s0 = ai; s1 = cuConj(aj); s2 = ak;         s3 = cuConj(al); }
+
+        cuDoubleComplex prod = cuCmul(sq.g, cuCmul(cuCmul(s0, s1), cuCmul(s2, s3)));
+        local_h4 += -cuCreal(prod);
+    }
+
+    sdata_h2[tid] = local_h2;
+    sdata_h4[tid] = local_h4;
+    __syncthreads();
+    for (int s = bdim / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata_h2[tid] += sdata_h2[tid + s];
+            sdata_h4[tid] += sdata_h4[tid + s];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        atomicAdd(&energies_h2[rep], sdata_h2[0]);
+        atomicAdd(&energies_h4[rep], sdata_h4[0]);
+    }
+}
+
+void mc_sparse_compute_split_energies(const MCStateSparse& state, double* h_e2, double* h_e4) {
+    int N = state.N;
+    int nrep = state.nrep;
+
+    double* d_e2;
+    double* d_e4;
+    CUDA_CHECK(cudaMalloc(&d_e2, nrep * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_e4, nrep * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_e2, 0, nrep * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_e4, 0, nrep * sizeof(double)));
+
+    long long max_terms = (state.n_quartets > n_pairs(N))
+                        ? state.n_quartets : n_pairs(N);
+    int e_blocks = (int)((max_terms + 255) / 256);
+    if (e_blocks > 1024) e_blocks = 1024;
+    dim3 grid(e_blocks, nrep);
+    split_energy_sparse_kernel<<<grid, 256, 2 * 256 * sizeof(double)>>>(
+        state.d_spins, state.d_g2, state.d_quartets, state.n_quartets,
+        N, nrep, d_e2, d_e4, state.h2_active);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(h_e2, d_e2, nrep * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_e4, d_e4, nrep * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_e2));
+    CUDA_CHECK(cudaFree(d_e4));
+}

@@ -57,4 +57,7 @@ void mc_sparse_get_results(const MCStateSparse& state, double* h_energies,
 // Copy all replica spins to host
 void mc_sparse_get_spins(const MCStateSparse& state, cuDoubleComplex* h_spins);
 
+// Compute H2 and H4 energy contributions separately for all replicas
+void mc_sparse_compute_split_energies(const MCStateSparse& state, double* h_e2, double* h_e4);
+
 #endif

@@ -121,9 +121,13 @@ int main(int argc, char** argv) {
     snprintf(efile, sizeof(efile), "%s/energy_accept.txt", datadir);
     snprintf(xfile, sizeof(xfile), "%s/exchanges.txt", datadir);
 
+    char esfile[256];
+    snprintf(esfile, sizeof(esfile), "%s/energy_split.txt", datadir);
+
     FILE* fout = fopen(efile, "w");
     FILE* fex  = fopen(xfile, "w");
-    if (!fout || !fex) { fprintf(stderr, "Cannot open output files\n"); return 2; }
+    FILE* fes  = fopen(esfile, "w");
+    if (!fout || !fex || !fes) { fprintf(stderr, "Cannot open output files\n"); return 2; }
 
     // Configs: single binary file (header + appended snapshots)
     char confbin[256];
@@ -143,6 +147,11 @@ int main(int argc, char** argv) {
     fprintf(fout, "\n");
 
     fprintf(fex, "# sweep\tTidx\tT_high\tT_low\tn_acc\tn_prop\trate\n");
+
+    fprintf(fes, "# sweep\tTidx\tT");
+    for (int r = 0; r < nrep_per_temp; r++)
+        fprintf(fes, "\tE2_%d/N\tE4_%d/N", r, r);
+    fprintf(fes, "\n");
 
     // --- GPU memory check ---
     long long mem_g2    = (long long)cfg.N * cfg.N * sizeof(cuDoubleComplex);
@@ -260,6 +269,9 @@ int main(int argc, char** argv) {
     cuDoubleComplex* h_spins = new cuDoubleComplex[spin_count];
     double* h_re_im = new double[2 * cfg.N];
 
+    double* h_e2 = new double[total_replicas];
+    double* h_e4 = new double[total_replicas];
+
     // Exchange counters (cumulative and per-save window)
     long long* ex_acc_total  = new long long[NT - 1]();
     long long* ex_prop_total = new long long[NT - 1]();
@@ -345,6 +357,18 @@ int main(int argc, char** argv) {
                 ex_prop_win[t] = 0;
             }
             fflush(fex);
+
+            // Split energies E2, E4
+            mc_compute_split_energies(state, h_e2, h_e4);
+            for (int t = 0; t < NT; t++) {
+                fprintf(fes, "%d\t%d\t%.8f", s + 1, t, T_sched[t]);
+                for (int r = 0; r < nrep_per_temp; r++) {
+                    int phys = perm[t * nrep_per_temp + r];
+                    fprintf(fes, "\t%.8f\t%.8f", h_e2[phys] / cfg.N, h_e4[phys] / cfg.N);
+                }
+                fprintf(fes, "\n");
+            }
+            fflush(fes);
 
             // Reset MC acceptance counters
             CUDA_CHECK(cudaMemset(state.d_accepted, 0, total_replicas * sizeof(long long)));
@@ -461,6 +485,7 @@ int main(int argc, char** argv) {
     // Cleanup
     fclose(fout);
     fclose(fex);
+    fclose(fes);
     fclose(fconf);
     delete[] T_sched;
     delete[] beta_sched;
@@ -475,6 +500,8 @@ int main(int argc, char** argv) {
     delete[] ex_prop_total;
     delete[] ex_acc_win;
     delete[] ex_prop_win;
+    delete[] h_e2;
+    delete[] h_e4;
     mc_free(state);
     return 0;
 }

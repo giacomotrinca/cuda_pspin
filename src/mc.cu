@@ -561,6 +561,127 @@ MCState mc_init(const SimConfig& cfg) {
     return state;
 }
 
+// ============================================================================
+// Split energy kernel: computes H2 and H4 contributions separately
+// ============================================================================
+__global__ void split_energy_kernel(
+    const cuDoubleComplex* __restrict__ all_spins,
+    const cuDoubleComplex* __restrict__ g2,
+    const cuDoubleComplex* __restrict__ g4,
+    const uint8_t*         __restrict__ g4_mask,
+    int N, int nrep,
+    double* energies_h2,
+    double* energies_h4,
+    int h2_active
+) {
+    int rep = blockIdx.y;
+    if (rep >= nrep) return;
+
+    extern __shared__ double sdata[];
+    int tid  = threadIdx.x;
+    int bdim = blockDim.x;
+    double* sdata_h2 = sdata;
+    double* sdata_h4 = sdata + bdim;
+
+    const cuDoubleComplex* spins = all_spins + (long long)rep * N;
+    double local_h2 = 0.0, local_h4 = 0.0;
+
+    // H2
+    if (h2_active) {
+        long long total_pairs = (long long)N * (N - 1) / 2;
+        for (long long p = (long long)blockIdx.x * bdim + tid; p < total_pairs;
+             p += (long long)gridDim.x * bdim) {
+            int j = (int)(0.5 + sqrt(0.25 + 2.0 * p));
+            int i = (int)(p - (long long)j * (j - 1) / 2);
+            if (i >= j) { j++; i = (int)(p - (long long)j * (j - 1) / 2); }
+            cuDoubleComplex gij  = g2[i * N + j];
+            cuDoubleComplex prod = cuCmul(gij, cuCmul(spins[i], cuConj(spins[j])));
+            local_h2 += -cuCreal(prod);
+        }
+    }
+
+    // H4
+    long long nq = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
+    for (long long q = (long long)blockIdx.x * bdim + tid; q < nq;
+         q += (long long)gridDim.x * bdim) {
+        cuDoubleComplex gq = g4[q];
+        uint8_t qmask = g4_mask[q];
+        if ((gq.x == 0.0 && gq.y == 0.0) || qmask == 0) continue;
+
+        int ii, jj, kk, ll;
+        {
+            int l = 3;
+            while ((long long)l * (l - 1) * (l - 2) * (l - 3) / 24 <= q) l++;
+            l--;
+            long long rem = q - (long long)l * (l - 1) * (l - 2) * (l - 3) / 24;
+            int k = 2;
+            while ((long long)k * (k - 1) * (k - 2) / 6 <= rem) k++;
+            k--;
+            rem -= (long long)k * (k - 1) * (k - 2) / 6;
+            int j = 1;
+            while ((long long)j * (j - 1) / 2 <= rem) j++;
+            j--;
+            rem -= (long long)j * (j - 1) / 2;
+            ii = (int)rem; jj = j; kk = k; ll = l;
+        }
+
+        cuDoubleComplex ai = spins[ii], aj = spins[jj];
+        cuDoubleComplex ak = spins[kk], al = spins[ll];
+
+        for (int ch = 0; ch < 3; ch++) {
+            if (!(qmask & (1 << ch))) continue;
+            cuDoubleComplex s0, s1, s2, s3;
+            if (ch == 0)      { s0 = ai; s1 = aj;         s2 = cuConj(ak); s3 = cuConj(al); }
+            else if (ch == 1) { s0 = ai; s1 = cuConj(aj); s2 = cuConj(ak); s3 = al; }
+            else              { s0 = ai; s1 = cuConj(aj); s2 = ak;         s3 = cuConj(al); }
+            cuDoubleComplex prod = cuCmul(gq, cuCmul(cuCmul(s0, s1), cuCmul(s2, s3)));
+            local_h4 += -cuCreal(prod);
+        }
+    }
+
+    sdata_h2[tid] = local_h2;
+    sdata_h4[tid] = local_h4;
+    __syncthreads();
+    for (int s = bdim / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata_h2[tid] += sdata_h2[tid + s];
+            sdata_h4[tid] += sdata_h4[tid + s];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        atomicAdd(&energies_h2[rep], sdata_h2[0]);
+        atomicAdd(&energies_h4[rep], sdata_h4[0]);
+    }
+}
+
+void mc_compute_split_energies(const MCState& state, double* h_e2, double* h_e4) {
+    int N = state.N;
+    int nrep = state.nrep;
+
+    double* d_e2;
+    double* d_e4;
+    CUDA_CHECK(cudaMalloc(&d_e2, nrep * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_e4, nrep * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_e2, 0, nrep * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_e4, 0, nrep * sizeof(double)));
+
+    long long nq = n_quartets(N);
+    long long max_terms = (nq > n_pairs(N)) ? nq : n_pairs(N);
+    int e_blocks = (int)((max_terms + 255) / 256);
+    if (e_blocks > 1024) e_blocks = 1024;
+    dim3 grid(e_blocks, nrep);
+    split_energy_kernel<<<grid, 256, 2 * 256 * sizeof(double)>>>(
+        state.d_spins, state.d_g2, state.d_g4, state.d_g4_mask,
+        N, nrep, d_e2, d_e4, state.h2_active);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(h_e2, d_e2, nrep * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_e4, d_e4, nrep * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_e2));
+    CUDA_CHECK(cudaFree(d_e4));
+}
+
 void mc_free(MCState& state) {
     delete[] state.h_omega;
     if (state.d_spins)    CUDA_CHECK(cudaFree(state.d_spins));

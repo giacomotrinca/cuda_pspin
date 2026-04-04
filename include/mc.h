@@ -51,4 +51,8 @@ void mc_sweep_pt(MCState& state);
 // Upload per-replica betas from host array to device
 void mc_set_betas(MCState& state, const double* h_betas);
 
+// Compute H2 and H4 energy contributions separately for all replicas
+// h_e2 and h_e4 must be pre-allocated arrays of size state.nrep
+void mc_compute_split_energies(const MCState& state, double* h_e2, double* h_e4);
+
 #endif

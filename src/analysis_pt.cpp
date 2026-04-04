@@ -22,8 +22,11 @@
 #include <map>
 #include <string>
 #include <algorithm>
+#include <set>
+#include <random>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sciplot/sciplot.hpp>
@@ -2208,26 +2211,1338 @@ int main(int argc, char** argv) {
             compute_glass_observables("link", link_s, nsamples, ntemps, nbins, N,
                                       -1.0, dqlink, temps, outdir);
 
-            // Write scatter data: (q_parisi, q_link) pairs
+            // Write scatter data: (q_parisi, q_link) pairs  [downsampled]
             {
                 char fname[512];
                 snprintf(fname, sizeof(fname), "%s/scatter_q_qlink.dat", outdir);
                 FILE* f = fopen(fname, "w");
                 if (f) {
+                    const int max_pts_per_T = 2000;
+                    std::mt19937 rng(42);
                     fprintf(f, "# Scatter: Parisi overlap q vs Link overlap q_link\n");
                     fprintf(f, "# Columns: q_parisi  q_link  Temperature\n");
+                    fprintf(f, "# (downsampled to max %d points per temperature)\n", max_pts_per_T);
                     for (int ti = 0; ti < ntemps; ti++) {
                         double T = temps[ti];
                         fprintf(f, "\n");
+                        // collect all points for this T
+                        std::vector<ScatterPt> pool;
                         for (int ss = 0; ss < nsamples; ss++)
-                            for (auto& pt : scat_s[ss][ti])
-                                fprintf(f, "%.8e\t%.8e\t%.8f\n", pt.q, pt.ql, T);
+                            pool.insert(pool.end(), scat_s[ss][ti].begin(), scat_s[ss][ti].end());
+                        // Fisher-Yates shuffle + truncate
+                        if ((int)pool.size() > max_pts_per_T) {
+                            for (int i = 0; i < max_pts_per_T; i++) {
+                                std::uniform_int_distribution<int> dist(i, (int)pool.size() - 1);
+                                std::swap(pool[i], pool[dist(rng)]);
+                            }
+                            pool.resize(max_pts_per_T);
+                        }
+                        for (auto& pt : pool)
+                            fprintf(f, "%.8e\t%.8e\t%.8f\n", pt.q, pt.ql, T);
                     }
                     fclose(f);
                     printf("  Written %s\n", fname);
                 }
             }
         }
+    }
+
+    // ================================================================
+    // Equipartition Parameter EP(T) + Shannon Entropy + Gini
+    // Merged: single ConfigStore pass, threaded over temperatures.
+    // EP = N * Var_k[<I_k>_t] / [mean_k <I_k>_t]^2
+    // S  = -sum_k p_k ln(p_k)    p_k = I_k / sum I_k
+    // Gini from sorted intensities
+    // ================================================================
+    if (nrep >= 1) {
+        printf("\n── Equipartition + Shannon/Gini (threads=%d) ───────\n", nthreads);
+
+        std::vector<std::vector<double>> ep_s(nsamples), shan_s(nsamples), gini_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+            ep_s[s].resize(ntemps, 0.0);
+            shan_s[s].resize(ntemps, 0.0);
+            gini_s[s].resize(ntemps, 0.0);
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+                    int tidx = all_data[ref][ti].tidx;
+
+                    // --- Compute <I_k> for EP ---
+                    std::vector<double> mean_Ik(N, 0.0);
+                    double sum_S = 0, sum_G = 0;
+                    int count = 0;
+
+                    for (int r = 0; r < nrep; r++) {
+                        for (auto& entry : cstore.entries[tidx][r]) {
+                            std::vector<double> Ik(N);
+                            double Itot = 0;
+                            for (int k = 0; k < N; k++) {
+                                double re = entry.data[2*k], im = entry.data[2*k+1];
+                                Ik[k] = re*re + im*im;
+                                mean_Ik[k] += Ik[k];
+                                Itot += Ik[k];
+                            }
+                            // Shannon entropy
+                            if (Itot > 0) {
+                                double S = 0;
+                                for (int k = 0; k < N; k++) {
+                                    double pk = Ik[k] / Itot;
+                                    if (pk > 0) S -= pk * log(pk);
+                                }
+                                sum_S += S;
+                                // Gini coefficient
+                                std::sort(Ik.begin(), Ik.end());
+                                double G_num = 0;
+                                for (int k = 0; k < N; k++)
+                                    G_num += (2.0 * (k + 1) - N - 1.0) * Ik[k];
+                                sum_G += G_num / (N * Itot);
+                            }
+                            count++;
+                        }
+                    }
+                    if (count == 0) continue;
+
+                    // EP
+                    for (int k = 0; k < N; k++) mean_Ik[k] /= count;
+                    double mean_of_Ik = 0, var_of_Ik = 0;
+                    for (int k = 0; k < N; k++) mean_of_Ik += mean_Ik[k];
+                    mean_of_Ik /= N;
+                    for (int k = 0; k < N; k++)
+                        var_of_Ik += (mean_Ik[k] - mean_of_Ik) * (mean_Ik[k] - mean_of_Ik);
+                    var_of_Ik /= N;
+                    ep_s[s][ti] = (mean_of_Ik > 0)
+                        ? N * var_of_Ik / (mean_of_Ik * mean_of_Ik) : 0.0;
+
+                    // Shannon & Gini averages
+                    shan_s[s][ti] = sum_S / count;
+                    gini_s[s][ti] = sum_G / count;
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+            for (auto& th : threads) th.join();
+            printf("  Sample S%d done\n", labels[s]);
+        }
+
+        // Write EP
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/ep.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Equipartition parameter EP(T) = N*Var_k[<I_k>]/<I_k>^2\n");
+                fprintf(f, "# T\tEP\tEP_err\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    std::vector<double> vals(nsamples);
+                    for (int s = 0; s < nsamples; s++) vals[s] = ep_s[s][ti];
+                    double fm = 0;
+                    for (auto v : vals) fm += v;
+                    fm /= nsamples;
+                    double jk = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lv = 0;
+                        for (int s = 0; s < nsamples; s++) if (s != j) lv += vals[s];
+                        lv /= (nsamples - 1);
+                        jk += (lv - fm) * (lv - fm);
+                    }
+                    jk = sqrt((nsamples - 1.0) / nsamples * jk);
+                    fprintf(f, "%.8f\t%.8e\t%.8e\n", temps[ti], fm, jk);
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+        // Write Shannon/Gini
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/entropy_gini.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Shannon entropy S and Gini coefficient G vs T\n");
+                fprintf(f, "# T\tS\tS_err\tGini\tGini_err\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    std::vector<double> vS(nsamples), vG(nsamples);
+                    for (int s = 0; s < nsamples; s++) {
+                        vS[s] = shan_s[s][ti]; vG[s] = gini_s[s][ti];
+                    }
+                    double fS = 0, fG = 0;
+                    for (int s = 0; s < nsamples; s++) { fS += vS[s]; fG += vG[s]; }
+                    fS /= nsamples; fG /= nsamples;
+                    double jS = 0, jG = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lS = 0, lG = 0;
+                        for (int s = 0; s < nsamples; s++) if (s != j) { lS += vS[s]; lG += vG[s]; }
+                        lS /= (nsamples - 1); lG /= (nsamples - 1);
+                        jS += (lS - fS) * (lS - fS);
+                        jG += (lG - fG) * (lG - fG);
+                    }
+                    jS = sqrt((nsamples - 1.0) / nsamples * jS);
+                    jG = sqrt((nsamples - 1.0) / nsamples * jG);
+                    fprintf(f, "%.8f\t%.8e\t%.8e\t%.8e\t%.8e\n", temps[ti], fS, jS, fG, jG);
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+    }
+
+    // ================================================================
+    // Non-Self-Averaging parameter for energy: A_E = N*Var_J[<E/N>] / <E/N>^2
+    // ================================================================
+    {
+        printf("\n── Non-self-averaging A_E ──────────────────────────\n");
+
+        char fname[512];
+        snprintf(fname, sizeof(fname), "%s/nsa_energy.dat", outdir);
+        FILE* f = fopen(fname, "w");
+        if (f) {
+            fprintf(f, "# Non-self-averaging parameter A_E = N*Var_J[<E/N>]/<E/N>^2\n");
+            fprintf(f, "# T\tA_E\tA_E_err\n");
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                // Per-sample <E/N> (averaged over replicas and second-half measurements)
+                std::vector<double> eJ(nsamples, 0.0);
+                for (int s = 0; s < nsamples; s++) {
+                    if (ti >= (int)all_data[s].size()) continue;
+                    double sum_e = 0;
+                    int cnt = 0;
+                    for (int r = 0; r < nrep; r++) {
+                        SampleObs obs = compute_obs(all_data[s][ti], r);
+                        sum_e += obs.e_mean;
+                        cnt++;
+                    }
+                    eJ[s] = (cnt > 0) ? sum_e / cnt : 0.0;
+                }
+                double mean_eJ = 0;
+                for (auto v : eJ) mean_eJ += v;
+                mean_eJ /= nsamples;
+                double var_eJ = 0;
+                for (auto v : eJ) var_eJ += (v - mean_eJ) * (v - mean_eJ);
+                var_eJ /= nsamples;
+
+                double A_E = (mean_eJ != 0)
+                    ? N * var_eJ / (mean_eJ * mean_eJ) : 0.0;
+
+                // Jackknife
+                double jk = 0;
+                for (int j = 0; j < nsamples; j++) {
+                    double lm = 0, lv = 0;
+                    for (int s = 0; s < nsamples; s++) if (s != j) lm += eJ[s];
+                    lm /= (nsamples - 1);
+                    for (int s = 0; s < nsamples; s++) if (s != j) lv += (eJ[s] - lm) * (eJ[s] - lm);
+                    lv /= (nsamples - 1);
+                    double lA = (lm != 0) ? N * lv / (lm * lm) : 0.0;
+                    jk += (lA - A_E) * (lA - A_E);
+                }
+                jk = sqrt((nsamples - 1.0) / nsamples * jk);
+                fprintf(f, "%.8f\t%.8e\t%.8e\n", T, A_E, jk);
+            }
+            fclose(f);
+            printf("  Written %s\n", fname);
+        }
+    }
+
+    // ================================================================
+    // Mode-frequency correlation: <I_k> vs omega_k
+    // ================================================================
+    if (nrep >= 1) {
+        printf("\n── Mode-frequency correlation ──────────────────────\n");
+
+        // Check if frequencies exist
+        std::vector<double> omega_ref;
+        {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[0]);
+            omega_ref = read_frequencies(sdir, N);
+        }
+        if (!omega_ref.empty()) {
+            // Compute <I_k> per temperature per mode (averaged over samples)
+            // Save for coldest and hottest temperatures
+            int t_cold = ntemps - 1, t_hot = 0;
+            int tsel[] = { t_hot, t_cold };
+            const char* tnames[] = { "hot", "cold" };
+
+            for (int tt = 0; tt < 2; tt++) {
+                int ti = tsel[tt];
+                int tidx = all_data[ref][ti].tidx;
+                std::vector<double> meanIk(N, 0.0);
+                int total_count = 0;
+
+                for (int s = 0; s < nsamples; s++) {
+                    char sdir[256];
+                    snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                             prefix, N, NT, nrep, labels[s]);
+                    ConfigStore cstore;
+                    cstore.load(sdir, N, NT, nrep);
+                    for (int r = 0; r < nrep; r++) {
+                        for (auto& entry : cstore.entries[tidx][r]) {
+                            for (int k = 0; k < N; k++) {
+                                double re = entry.data[2*k], im = entry.data[2*k+1];
+                                meanIk[k] += re*re + im*im;
+                            }
+                            total_count++;
+                        }
+                    }
+                }
+                if (total_count > 0)
+                    for (int k = 0; k < N; k++) meanIk[k] /= total_count;
+
+                char fname[512];
+                snprintf(fname, sizeof(fname), "%s/mode_freq_corr_%s.dat", outdir, tnames[tt]);
+                FILE* f = fopen(fname, "w");
+                if (f) {
+                    fprintf(f, "# Mode-frequency correlation at T=%s (T=%.6f)\n", tnames[tt], temps[ti]);
+                    fprintf(f, "# omega_k\t<I_k>\n");
+                    for (int k = 0; k < N; k++)
+                        fprintf(f, "%.8e\t%.8e\n", omega_ref[k], meanIk[k]);
+                    fclose(f);
+                    printf("  Written %s\n", fname);
+                }
+            }
+        } else {
+            printf("  No frequencies.txt found — skipping\n");
+        }
+    }
+
+    // ================================================================
+    // Franz-Parisi potential V(q) = -T * ln P(q)
+    // ================================================================
+    if (nrep > 1) {
+        printf("\n── Franz-Parisi potential V(q) ─────────────────────\n");
+
+        // Read P(q) data from pq_*.dat files (already written above)
+        for (int ti = 0; ti < ntemps; ti++) {
+            char pqfile[512];
+            snprintf(pqfile, sizeof(pqfile), "%s/pq_T%.4f.dat", outdir, temps[ti]);
+            FILE* fin = fopen(pqfile, "r");
+            if (!fin) continue;
+
+            char vqfile[512];
+            snprintf(vqfile, sizeof(vqfile), "%s/vq_T%.4f.dat", outdir, temps[ti]);
+            FILE* fout = fopen(vqfile, "w");
+            if (!fout) { fclose(fin); continue; }
+
+            fprintf(fout, "# Franz-Parisi potential V(q) = -T*ln(P(q)) at T=%.6f\n", temps[ti]);
+            fprintf(fout, "# q\tV(q)\n");
+
+            char line[1024];
+            while (fgets(line, sizeof(line), fin)) {
+                if (line[0] == '#') continue;
+                double q, pq, pq_err;
+                if (sscanf(line, "%lf\t%lf\t%lf", &q, &pq, &pq_err) >= 2 && pq > 0) {
+                    double Vq = -temps[ti] * log(pq);
+                    fprintf(fout, "%.8e\t%.8e\n", q, Vq);
+                }
+            }
+            fclose(fin);
+            fclose(fout);
+        }
+        printf("  Written V(q) files\n");
+    }
+
+    // ================================================================
+    // Autocorrelation C(tau) from configs
+    // C(tau) = (1/N) sum_k Re(a*_k(t) a_k(t+tau)) averaged over t
+    // ================================================================
+    if (nrep >= 1) {
+        printf("\n── Autocorrelation C(tau) (threads=%d) ─────────────\n", nthreads);
+
+        // autocorr_s[s][ti][lag]
+        int max_lag = 50;
+        std::vector<std::vector<std::vector<double>>> autocorr_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+            autocorr_s[s].resize(ntemps);
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+                    int tidx = all_data[ref][ti].tidx;
+                    int nsnap = 0;
+                    for (int r = 0; r < nrep; r++)
+                        nsnap = std::max(nsnap, (int)cstore.entries[tidx][r].size());
+                    int nlags = std::min(max_lag, nsnap / 2);
+                    if (nlags < 1) nlags = 1;
+                    autocorr_s[s][ti].assign(nlags, 0.0);
+
+                    for (int r = 0; r < nrep; r++) {
+                        int ns = (int)cstore.entries[tidx][r].size();
+                        if (ns < 2) continue;
+                        for (int lag = 0; lag < nlags; lag++) {
+                            double c_sum = 0;
+                            int c_count = 0;
+                            for (int t0 = 0; t0 + lag < ns; t0++) {
+                                double dot = 0, n0 = 0, n1 = 0;
+                                auto& d0 = cstore.entries[tidx][r][t0].data;
+                                auto& d1 = cstore.entries[tidx][r][t0 + lag].data;
+                                for (int k = 0; k < N; k++) {
+                                    double re0 = d0[2*k], im0 = d0[2*k+1];
+                                    double re1 = d1[2*k], im1 = d1[2*k+1];
+                                    dot += re0*re1 + im0*im1;
+                                    n0 += re0*re0 + im0*im0;
+                                    n1 += re1*re1 + im1*im1;
+                                }
+                                double norm = sqrt(n0 * n1);
+                                c_sum += (norm > 0) ? dot / norm : 0.0;
+                                c_count++;
+                            }
+                            if (c_count > 0)
+                                autocorr_s[s][ti][lag] += c_sum / c_count;
+                        }
+                    }
+                    for (int lag = 0; lag < nlags; lag++)
+                        autocorr_s[s][ti][lag] /= nrep;
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+            for (auto& th : threads) th.join();
+            printf("  Sample S%d done\n", labels[s]);
+        }
+
+        // Write for a few temperatures
+        int tsel[] = { 0, ntemps / 4, ntemps / 2, 3 * ntemps / 4, ntemps - 1 };
+        int ntsel = 5;
+        for (int tt = 0; tt < ntsel; tt++) {
+            int ti = tsel[tt];
+            if (ti < 0 || ti >= ntemps) continue;
+            int nlags = 0;
+            for (int s = 0; s < nsamples; s++)
+                nlags = std::max(nlags, (int)autocorr_s[s][ti].size());
+            if (nlags < 1) continue;
+
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/autocorr_T%.4f.dat", outdir, temps[ti]);
+            FILE* f = fopen(fname, "w");
+            if (!f) continue;
+            fprintf(f, "# Autocorrelation C(tau) at T=%.6f\n", temps[ti]);
+            fprintf(f, "# lag\tC\tC_err\n");
+
+            for (int lag = 0; lag < nlags; lag++) {
+                std::vector<double> vals(nsamples, 0.0);
+                for (int s = 0; s < nsamples; s++)
+                    if (lag < (int)autocorr_s[s][ti].size())
+                        vals[s] = autocorr_s[s][ti][lag];
+                double fm = 0;
+                for (auto v : vals) fm += v;
+                fm /= nsamples;
+                double jk = 0;
+                for (int j = 0; j < nsamples; j++) {
+                    double lv = 0;
+                    for (int s = 0; s < nsamples; s++) if (s != j) lv += vals[s];
+                    lv /= (nsamples - 1);
+                    jk += (lv - fm) * (lv - fm);
+                }
+                jk = sqrt((nsamples - 1.0) / nsamples * jk);
+                fprintf(f, "%d\t%.8e\t%.8e\n", lag, fm, jk);
+            }
+            fclose(f);
+            printf("  Written %s\n", fname);
+        }
+    }
+
+    // ================================================================
+    // Decorrelation time from energy autocorrelation
+    // tau_E defined by C_E(tau_E) = 1/e
+    // ================================================================
+    {
+        printf("\n── Decorrelation time (energy) ─────────────────────\n");
+
+        // tau_s[s][ti] = decorrelation time for sample s, temperature ti
+        std::vector<std::vector<double>> tau_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            tau_s[s].resize(ntemps, 0.0);
+            for (int ti = 0; ti < ntemps; ti++) {
+                if (ti >= (int)all_data[s].size()) continue;
+                auto& tb = all_data[s][ti];
+                int M = (int)tb.energy.size();
+                int start = M / 2;
+                if (start >= M) continue;
+                int n = M - start;
+                if (n < 4) continue;
+
+                // Compute energy time series (replica-averaged)
+                std::vector<double> e_ts(n);
+                for (int i = 0; i < n; i++) {
+                    double sum = 0;
+                    for (int r = 0; r < nrep; r++)
+                        sum += tb.energy[start + i][r];
+                    e_ts[i] = sum / nrep;
+                }
+                double e_mean = 0, e2_mean = 0;
+                for (double v : e_ts) { e_mean += v; e2_mean += v * v; }
+                e_mean /= n; e2_mean /= n;
+                double var_e = e2_mean - e_mean * e_mean;
+                if (var_e <= 0) continue;
+
+                // Compute C_E(lag) and find where it drops below 1/e
+                double tau = 0;
+                for (int lag = 1; lag < n / 2; lag++) {
+                    double c = 0;
+                    int cnt = 0;
+                    for (int i = 0; i + lag < n; i++) {
+                        c += (e_ts[i] - e_mean) * (e_ts[i + lag] - e_mean);
+                        cnt++;
+                    }
+                    c /= cnt;
+                    double rho = c / var_e;
+                    if (rho < 1.0 / M_E) { // 1/e
+                        // Linear interpolation
+                        double c_prev = var_e;
+                        if (lag > 1) {
+                            double cp = 0;
+                            int cnt2 = 0;
+                            for (int i = 0; i + lag - 1 < n; i++) {
+                                cp += (e_ts[i] - e_mean) * (e_ts[i + lag - 1] - e_mean);
+                                cnt2++;
+                            }
+                            c_prev = cp / cnt2;
+                        }
+                        double rho_prev = c_prev / var_e;
+                        if (rho_prev > 1.0 / M_E)
+                            tau = (lag - 1) + (rho_prev - 1.0/M_E) / (rho_prev - rho);
+                        else
+                            tau = lag;
+                        break;
+                    }
+                    if (lag == n / 2 - 1) tau = lag; // never crossed 1/e
+                }
+                tau_s[s][ti] = tau;
+            }
+        }
+
+        char fname[512];
+        snprintf(fname, sizeof(fname), "%s/decorrelation_time.dat", outdir);
+        FILE* f = fopen(fname, "w");
+        if (f) {
+            fprintf(f, "# Energy decorrelation time tau_E (in save_freq units)\n");
+            fprintf(f, "# T\ttau_E\ttau_E_err\n");
+            for (int ti = 0; ti < ntemps; ti++) {
+                std::vector<double> vals(nsamples);
+                for (int s = 0; s < nsamples; s++) vals[s] = tau_s[s][ti];
+                double fm = 0;
+                for (auto v : vals) fm += v;
+                fm /= nsamples;
+                double jk = 0;
+                for (int j = 0; j < nsamples; j++) {
+                    double lv = 0;
+                    for (int s = 0; s < nsamples; s++) if (s != j) lv += vals[s];
+                    lv /= (nsamples - 1);
+                    jk += (lv - fm) * (lv - fm);
+                }
+                jk = sqrt((nsamples - 1.0) / nsamples * jk);
+                fprintf(f, "%.8f\t%.8e\t%.8e\n", temps[ti], fm, jk);
+            }
+            fclose(f);
+            printf("  Written %s\n", fname);
+        }
+    }
+
+    // ================================================================
+    // Mode-mode correlation matrix C_ij eigenvalue spectrum
+    // C_ij = <delta_I_i * delta_I_j> / sqrt(<delta_I_i^2> * <delta_I_j^2>)
+    // ================================================================
+    if (nrep >= 1 && N <= 200) {
+        printf("\n── Mode-mode correlation eigenvalues (threads=%d) ──\n", nthreads);
+
+        int tsel_mm[] = { 0, ntemps / 2, ntemps - 1 };
+        int ntsel_mm = 3;
+        const char* tnames_mm[] = { "hot", "mid", "cold" };
+
+        // Per-temperature accumulators
+        std::vector<std::vector<double>> all_meanI(ntsel_mm, std::vector<double>(N, 0.0));
+        std::vector<std::vector<double>> all_Cij(ntsel_mm, std::vector<double>(N * N, 0.0));
+        std::vector<int> all_count(ntsel_mm, 0);
+        std::vector<std::mutex> mtx_mm(ntsel_mm);
+
+        // Load ConfigStore once per sample, accumulate for all 3 temperatures in parallel
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+
+            std::atomic<int> tt_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int tt = tt_next.fetch_add(1);
+                    if (tt >= ntsel_mm) break;
+                    int ti = tsel_mm[tt];
+                    if (ti < 0 || ti >= ntemps) continue;
+                    int tidx = all_data[ref][ti].tidx;
+
+                    std::vector<double> local_meanI(N, 0.0);
+                    std::vector<double> local_Cij(N * N, 0.0);
+                    int local_count = 0;
+
+                    for (int r = 0; r < nrep; r++) {
+                        for (auto& entry : cstore.entries[tidx][r]) {
+                            std::vector<double> Ik(N);
+                            for (int k = 0; k < N; k++) {
+                                double re = entry.data[2*k], im = entry.data[2*k+1];
+                                Ik[k] = re*re + im*im;
+                            }
+                            for (int i = 0; i < N; i++) {
+                                local_meanI[i] += Ik[i];
+                                for (int j = i; j < N; j++)
+                                    local_Cij[i * N + j] += Ik[i] * Ik[j];
+                            }
+                            local_count++;
+                        }
+                    }
+
+                    std::lock_guard<std::mutex> lk(mtx_mm[tt]);
+                    for (int i = 0; i < N; i++) all_meanI[tt][i] += local_meanI[i];
+                    for (int i = 0; i < N * N; i++) all_Cij[tt][i] += local_Cij[i];
+                    all_count[tt] += local_count;
+                }
+            };
+
+            int nt = std::min(nthreads, ntsel_mm);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+            for (auto& th : threads) th.join();
+        }
+
+        // Finalize and write for each temperature
+        for (int tt = 0; tt < ntsel_mm; tt++) {
+            int ti = tsel_mm[tt];
+            if (ti < 0 || ti >= ntemps) continue;
+            if (all_count[tt] == 0) continue;
+
+            auto& meanI = all_meanI[tt];
+            auto& Cij = all_Cij[tt];
+            int tc = all_count[tt];
+
+            for (int i = 0; i < N; i++) meanI[i] /= tc;
+            for (int i = 0; i < N; i++)
+                for (int j = i; j < N; j++) {
+                    Cij[i * N + j] = Cij[i * N + j] / tc - meanI[i] * meanI[j];
+                    Cij[j * N + i] = Cij[i * N + j];
+                }
+            for (int i = 0; i < N; i++)
+                for (int j = 0; j < N; j++) {
+                    double di = Cij[i * N + i], dj = Cij[j * N + j];
+                    if (di > 0 && dj > 0 && i != j)
+                        Cij[i * N + j] /= sqrt(di * dj);
+                }
+            for (int i = 0; i < N; i++) Cij[i * N + i] = 1.0;
+
+            // Jacobi eigenvalue algorithm
+            std::vector<double> A(Cij);
+            int n = N;
+            for (int iter = 0; iter < 100 * n; iter++) {
+                int p = 0, q = 1;
+                double max_val = 0;
+                for (int i = 0; i < n; i++)
+                    for (int j = i + 1; j < n; j++)
+                        if (fabs(A[i*n+j]) > max_val) { max_val = fabs(A[i*n+j]); p = i; q = j; }
+                if (max_val < 1e-12) break;
+
+                double app = A[p*n+p], aqq = A[q*n+q], apq = A[p*n+q];
+                double theta = 0.5 * atan2(2*apq, app - aqq);
+                double c = cos(theta), s = sin(theta);
+
+                for (int i = 0; i < n; i++) {
+                    if (i == p || i == q) continue;
+                    double aip = A[i*n+p], aiq = A[i*n+q];
+                    A[i*n+p] = A[p*n+i] = c*aip + s*aiq;
+                    A[i*n+q] = A[q*n+i] = -s*aip + c*aiq;
+                }
+                A[p*n+p] = c*c*app + 2*s*c*apq + s*s*aqq;
+                A[q*n+q] = s*s*app - 2*s*c*apq + c*c*aqq;
+                A[p*n+q] = A[q*n+p] = 0;
+            }
+
+            std::vector<double> evals(n);
+            for (int i = 0; i < n; i++) evals[i] = A[i*n+i];
+            std::sort(evals.begin(), evals.end(), std::greater<double>());
+
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/eigvals_%s.dat", outdir, tnames_mm[tt]);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Eigenvalues of mode-mode correlation matrix at T=%s (%.6f)\n",
+                        tnames_mm[tt], temps[ti]);
+                fprintf(f, "# index\tlambda\tlambda/N\n");
+                for (int i = 0; i < n; i++)
+                    fprintf(f, "%d\t%.8e\t%.8e\n", i, evals[i], evals[i] / n);
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+    }
+
+    // ================================================================
+    // Ultrametricity test (requires nrep >= 3)
+    // For triplets (a,b,c), compute overlaps q_ab, q_bc, q_ac
+    // Sort: q1 <= q2 <= q3. Ultrametric => q1 ~ q2.
+    //
+    // STREAMING: 2D histogram + running mean instead of storing all
+    // raw points. Memory: O(nbins² × ntemps) instead of O(ntriplets).
+    // Snapshot subsampling to cap O(nrep³ × nsnap) computation.
+    // ================================================================
+    if (nrep >= 3) {
+        printf("\n── Ultrametricity test (nrep=%d, threads=%d) ───────\n", nrep, nthreads);
+
+        const int nbins_um = 100;
+        const double d12_max = 2.0;           // |q1-q2| ∈ [0, 2]
+        const double q3_min = -1.0, q3_max = 1.0;
+        const double d12_dbin = d12_max / nbins_um;
+        const double q3_dbin  = (q3_max - q3_min) / nbins_um;
+        const int max_iters_um = 256;         // cap snapshots per (ti,s)
+
+        // 2D histogram accumulated over all samples — ~3 MB total
+        std::vector<std::vector<double>> hist2d(ntemps,
+            std::vector<double>(nbins_um * nbins_um, 0.0));
+        // Per-sample mean |q1-q2| for jackknife
+        std::vector<std::vector<double>> mean_d12_s(nsamples,
+            std::vector<double>(ntemps, 0.0));
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+                    int tidx = all_data[ref][ti].tidx;
+
+                    // Find common iterations across all replicas
+                    auto iters0 = cstore.get_iters(tidx, 0);
+                    std::set<int> common(iters0.begin(), iters0.end());
+                    for (int r = 1; r < nrep; r++) {
+                        auto it_r = cstore.get_iters(tidx, r);
+                        std::set<int> s_r(it_r.begin(), it_r.end());
+                        std::set<int> tmp;
+                        std::set_intersection(common.begin(), common.end(),
+                                              s_r.begin(), s_r.end(),
+                                              std::inserter(tmp, tmp.begin()));
+                        common = tmp;
+                    }
+                    std::vector<int> c_iters(common.begin(), common.end());
+                    if (c_iters.empty()) continue;
+
+                    // Subsample snapshots if too many
+                    if ((int)c_iters.size() > max_iters_um) {
+                        std::mt19937 rng(42 + s * ntemps + ti);
+                        std::shuffle(c_iters.begin(), c_iters.end(), rng);
+                        c_iters.resize(max_iters_um);
+                    }
+
+                    // Thread-local histogram + streaming mean
+                    std::vector<double> local_hist(nbins_um * nbins_um, 0.0);
+                    double sum_d12 = 0;
+                    int count = 0;
+
+                    for (int it : c_iters) {
+                        for (int ra = 0; ra < nrep; ra++)
+                            for (int rb = ra + 1; rb < nrep; rb++)
+                                for (int rc = rb + 1; rc < nrep; rc++) {
+                                    auto* ea = cstore.find_entry(tidx, ra, it);
+                                    auto* eb = cstore.find_entry(tidx, rb, it);
+                                    auto* ec = cstore.find_entry(tidx, rc, it);
+                                    if (!ea || !eb || !ec) continue;
+
+                                    auto overlap = [&](const std::vector<double>& d1,
+                                                       const std::vector<double>& d2) {
+                                        double num = 0, n1 = 0, n2 = 0;
+                                        for (int k = 0; k < N; k++) {
+                                            double r1 = d1[2*k], i1 = d1[2*k+1];
+                                            double r2 = d2[2*k], i2 = d2[2*k+1];
+                                            num += r1*r2 + i1*i2;
+                                            n1 += r1*r1 + i1*i1;
+                                            n2 += r2*r2 + i2*i2;
+                                        }
+                                        double norm = sqrt(n1 * n2);
+                                        return (norm > 0) ? num / norm : 0.0;
+                                    };
+
+                                    double q[3] = {
+                                        overlap(ea->data, eb->data),
+                                        overlap(eb->data, ec->data),
+                                        overlap(ea->data, ec->data)
+                                    };
+                                    std::sort(q, q + 3);
+                                    double d12 = fabs(q[0] - q[1]);
+                                    double q3  = q[2];
+
+                                    int b_d12 = (int)(d12 / d12_dbin);
+                                    int b_q3  = (int)((q3 - q3_min) / q3_dbin);
+                                    if (b_d12 >= nbins_um) b_d12 = nbins_um - 1;
+                                    if (b_q3 < 0) b_q3 = 0;
+                                    if (b_q3 >= nbins_um) b_q3 = nbins_um - 1;
+                                    local_hist[b_d12 * nbins_um + b_q3]++;
+                                    sum_d12 += d12;
+                                    count++;
+                                }
+                    }
+
+                    // Merge — no lock: unique ti per thread, join between samples
+                    for (int i = 0; i < nbins_um * nbins_um; i++)
+                        hist2d[ti][i] += local_hist[i];
+                    mean_d12_s[s][ti] = (count > 0) ? sum_d12 / count : 0.0;
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+            for (auto& th : threads) th.join();
+            printf("  Sample S%d done\n", labels[s]);
+        }
+
+        // Write 2D histogram per temperature (heatmap-ready)
+        for (int ti = 0; ti < ntemps; ti++) {
+            double total = 0;
+            for (auto h : hist2d[ti]) total += h;
+            if (total == 0) continue;
+
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/ultrametric_T%.4f.dat", outdir, temps[ti]);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Ultrametricity 2D histogram at T=%.6f\n", temps[ti]);
+                fprintf(f, "# |q1-q2|\tq3\tdensity\n");
+                for (int bd = 0; bd < nbins_um; bd++)
+                    for (int bq = 0; bq < nbins_um; bq++) {
+                        double val = hist2d[ti][bd * nbins_um + bq];
+                        if (val > 0)
+                            fprintf(f, "%.8e\t%.8e\t%.8e\n",
+                                    (bd + 0.5) * d12_dbin,
+                                    q3_min + (bq + 0.5) * q3_dbin,
+                                    val / (total * d12_dbin * q3_dbin));
+                    }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+
+        // Write mean |q1-q2| vs T with jackknife errors
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/ultrametric_mean.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Mean |q1-q2| vs T  (ultrametricity: 0 = perfectly ultrametric)\n");
+                fprintf(f, "# T\t<|q1-q2|>\terr\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    std::vector<double> vals(nsamples);
+                    for (int ss = 0; ss < nsamples; ss++) vals[ss] = mean_d12_s[ss][ti];
+                    double fm = 0;
+                    for (auto v : vals) fm += v;
+                    fm /= nsamples;
+                    double jk = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lv = 0;
+                        for (int ss = 0; ss < nsamples; ss++)
+                            if (ss != j) lv += vals[ss];
+                        lv /= (nsamples - 1);
+                        jk += (lv - fm) * (lv - fm);
+                    }
+                    jk = sqrt((nsamples - 1.0) / nsamples * jk);
+                    fprintf(f, "%.8f\t%.8e\t%.8e\n", temps[ti], fm, jk);
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+    }
+
+    // ================================================================
+    // Inter-sample overlap P_inter(q)
+    // Overlap between configs from DIFFERENT disorder samples
+    // ================================================================
+    if (nsamples >= 2 && nrep >= 1) {
+        printf("\n── Inter-sample overlap (threads=%d) ───────────────\n", nthreads);
+
+        double qmin = -1.0, qmax = 1.0;
+        double dq = (qmax - qmin) / nbins;
+
+        // Load configs for all samples
+        std::vector<ConfigStore> all_configs(nsamples);
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            all_configs[s].load(sdir, N, NT, nrep);
+        }
+
+        // Per-temperature histograms (each thread writes its own ti)
+        std::vector<std::vector<double>> hists(ntemps);
+        std::vector<int> total_pairs_per_ti(ntemps, 0);
+        for (int ti = 0; ti < ntemps; ti++) hists[ti].assign(nbins, 0.0);
+
+        std::atomic<int> ti_next(0);
+        auto worker = [&](int /*id*/) {
+            while (true) {
+                int ti = ti_next.fetch_add(1);
+                if (ti >= ntemps) break;
+                int tidx = all_data[ref][ti].tidx;
+                auto& hist = hists[ti];
+                int& tp = total_pairs_per_ti[ti];
+
+                for (int sa = 0; sa < nsamples; sa++)
+                    for (int sb = sa + 1; sb < nsamples; sb++) {
+                        for (int ra = 0; ra < nrep; ra++) {
+                            auto& ea = all_configs[sa].entries[tidx][ra];
+                            if (ea.empty()) continue;
+                            auto& da = ea.back().data;
+                            for (int rb = 0; rb < nrep; rb++) {
+                                auto& eb = all_configs[sb].entries[tidx][rb];
+                                if (eb.empty()) continue;
+                                auto& db = eb.back().data;
+
+                                double num = 0, n1 = 0, n2 = 0;
+                                for (int k = 0; k < N; k++) {
+                                    double r1 = da[2*k], i1 = da[2*k+1];
+                                    double r2 = db[2*k], i2 = db[2*k+1];
+                                    num += r1*r2 + i1*i2;
+                                    n1 += r1*r1 + i1*i1;
+                                    n2 += r2*r2 + i2*i2;
+                                }
+                                double norm = sqrt(n1 * n2);
+                                double q = (norm > 0) ? num / norm : 0.0;
+                                int bin = (int)((q - qmin) / dq);
+                                if (bin < 0) bin = 0;
+                                if (bin >= nbins) bin = nbins - 1;
+                                hist[bin]++;
+                                tp++;
+                            }
+                        }
+                    }
+            }
+        };
+
+        int nt = std::min(nthreads, ntemps);
+        std::vector<std::thread> threads;
+        for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+        for (auto& th : threads) th.join();
+
+        // Write files
+        for (int ti = 0; ti < ntemps; ti++) {
+            if (total_pairs_per_ti[ti] == 0) continue;
+            for (auto& h : hists[ti]) h /= (total_pairs_per_ti[ti] * dq);
+
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/pq_inter_T%.4f.dat", outdir, temps[ti]);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Inter-sample overlap P_inter(q) at T=%.6f\n", temps[ti]);
+                fprintf(f, "# q\tP_inter(q)\n");
+                for (int b = 0; b < nbins; b++)
+                    fprintf(f, "%.8e\t%.8e\n", qmin + (b + 0.5) * dq, hists[ti][b]);
+                fclose(f);
+            }
+        }
+        printf("  Written inter-sample overlap files\n");
+    }
+
+    // ================================================================
+    // E2/E4 split vs T (from energy_split.txt)
+    // ================================================================
+    {
+        printf("\n── E2/E4 energy split ──────────────────────────────\n");
+
+        // Read energy_split.txt for each sample
+        // Format: sweep Tidx T  E2_0/N E4_0/N  E2_1/N E4_1/N ...
+        // e2_s[s][ti], e4_s[s][ti] = time-averaged split energies
+        std::vector<std::vector<double>> e2_s(nsamples), e4_s(nsamples);
+        bool have_split = false;
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            char esfile[512];
+            snprintf(esfile, sizeof(esfile), "%s/energy_split.txt", sdir);
+            FILE* f = fopen(esfile, "r");
+            if (!f) continue;
+            have_split = true;
+
+            // Accumulate per-temperature averages
+            std::vector<double> sum_e2(ntemps, 0.0), sum_e4(ntemps, 0.0);
+            std::vector<int> count(ntemps, 0);
+
+            char line[4096];
+            while (fgets(line, sizeof(line), f)) {
+                if (line[0] == '#') continue;
+                int sweep, tidx_val;
+                double T;
+                int n_parsed = sscanf(line, "%d\t%d\t%lf", &sweep, &tidx_val, &T);
+                if (n_parsed < 3) continue;
+                // Only use second half
+                if (sweep < all_data[ref][0].sweeps.back() / 2) continue;
+
+                // Parse replica E2/E4 pairs
+                char* ptr = line;
+                for (int skip = 0; skip < 3; skip++) { // skip sweep, Tidx, T
+                    while (*ptr && *ptr != '\t') ptr++;
+                    if (*ptr) ptr++;
+                }
+                double rep_e2_sum = 0, rep_e4_sum = 0;
+                int nrep_read = 0;
+                for (int r = 0; r < nrep; r++) {
+                    double e2v, e4v;
+                    if (sscanf(ptr, "%lf\t%lf", &e2v, &e4v) == 2) {
+                        rep_e2_sum += e2v;
+                        rep_e4_sum += e4v;
+                        nrep_read++;
+                    }
+                    // Advance past two tab-separated values
+                    for (int skip = 0; skip < 2; skip++) {
+                        while (*ptr && *ptr != '\t') ptr++;
+                        if (*ptr) ptr++;
+                    }
+                }
+
+                // Find temperature index
+                int ti_match = -1;
+                for (int ti = 0; ti < ntemps; ti++) {
+                    if (fabs(temps[ti] - T) < 1e-6) { ti_match = ti; break; }
+                }
+                if (ti_match >= 0 && nrep_read > 0) {
+                    sum_e2[ti_match] += rep_e2_sum / nrep_read;
+                    sum_e4[ti_match] += rep_e4_sum / nrep_read;
+                    count[ti_match]++;
+                }
+            }
+            fclose(f);
+
+            e2_s[s].resize(ntemps, 0.0);
+            e4_s[s].resize(ntemps, 0.0);
+            for (int ti = 0; ti < ntemps; ti++) {
+                if (count[ti] > 0) {
+                    e2_s[s][ti] = sum_e2[ti] / count[ti];
+                    e4_s[s][ti] = sum_e4[ti] / count[ti];
+                }
+            }
+        }
+
+        if (have_split) {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/energy_split.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# E2/N and E4/N vs T (split energy contributions)\n");
+                fprintf(f, "# T\tE2/N\tE2_err\tE4/N\tE4_err\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    std::vector<double> v2(nsamples), v4(nsamples);
+                    for (int s = 0; s < nsamples; s++) {
+                        v2[s] = (s < (int)e2_s.size() && ti < (int)e2_s[s].size()) ? e2_s[s][ti] : 0;
+                        v4[s] = (s < (int)e4_s.size() && ti < (int)e4_s[s].size()) ? e4_s[s][ti] : 0;
+                    }
+                    double f2 = 0, f4 = 0;
+                    for (int s = 0; s < nsamples; s++) { f2 += v2[s]; f4 += v4[s]; }
+                    f2 /= nsamples; f4 /= nsamples;
+                    double j2 = 0, j4 = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double l2 = 0, l4 = 0;
+                        for (int s = 0; s < nsamples; s++) if (s != j) { l2 += v2[s]; l4 += v4[s]; }
+                        l2 /= (nsamples - 1); l4 /= (nsamples - 1);
+                        j2 += (l2 - f2) * (l2 - f2);
+                        j4 += (l4 - f4) * (l4 - f4);
+                    }
+                    j2 = sqrt((nsamples - 1.0) / nsamples * j2);
+                    j4 = sqrt((nsamples - 1.0) / nsamples * j4);
+                    fprintf(f, "%.8f\t%.8e\t%.8e\t%.8e\t%.8e\n", temps[ti], f2, j2, f4, j4);
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        } else {
+            printf("  No energy_split.txt found — run simulation first\n");
+        }
+    }
+
+    // ================================================================
+    // FSS: Cv peak extraction (Tc estimate)
+    // ================================================================
+    {
+        printf("\n── FSS: Cv peak ────────────────────────────────────\n");
+
+        // Compute Cv per temperature (replica-averaged, sample-averaged)
+        std::vector<double> cv_mean(ntemps, 0.0);
+        for (int ti = 0; ti < ntemps; ti++) {
+            double T = temps[ti];
+            double sum_cv = 0;
+            for (int s = 0; s < nsamples; s++) {
+                if (ti >= (int)all_data[s].size()) continue;
+                double cv_s = 0;
+                for (int r = 0; r < nrep; r++) {
+                    SampleObs obs = compute_obs(all_data[s][ti], r);
+                    cv_s += N * (obs.e2_mean - obs.e_mean * obs.e_mean) / (T * T);
+                }
+                sum_cv += cv_s / nrep;
+            }
+            cv_mean[ti] = sum_cv / nsamples;
+        }
+
+        // Find peak
+        int i_peak = 0;
+        for (int ti = 1; ti < ntemps; ti++)
+            if (cv_mean[ti] > cv_mean[i_peak]) i_peak = ti;
+
+        // Parabolic interpolation around peak
+        double Tc = temps[i_peak], Cv_max = cv_mean[i_peak];
+        if (i_peak > 0 && i_peak < ntemps - 1) {
+            double T0 = temps[i_peak-1], T1 = temps[i_peak], T2 = temps[i_peak+1];
+            double C0 = cv_mean[i_peak-1], C1 = cv_mean[i_peak], C2 = cv_mean[i_peak+1];
+            double denom = (T0 - T1) * (T0 - T2) * (T1 - T2);
+            if (fabs(denom) > 1e-30) {
+                double a = (T2 * (C1 - C0) + T1 * (C0 - C2) + T0 * (C2 - C1)) / denom;
+                double b = (T2*T2*(C0 - C1) + T1*T1*(C2 - C0) + T0*T0*(C1 - C2)) / denom;
+                if (fabs(a) > 1e-30) {
+                    Tc = -b / (2 * a);
+                    Cv_max = (a * Tc + b) * Tc +
+                             C0 - a * T0 * T0 - b * T0; // evaluate parabola
+                }
+            }
+        }
+
+        char fname[512];
+        snprintf(fname, sizeof(fname), "%s/fss_cv_peak.dat", outdir);
+        FILE* f = fopen(fname, "w");
+        if (f) {
+            fprintf(f, "# FSS: Cv peak analysis\n");
+            fprintf(f, "# N=%d\n", N);
+            fprintf(f, "# Tc_estimate\tCv_max\tpeak_Tidx\n");
+            fprintf(f, "%.8f\t%.8e\t%d\n", Tc, Cv_max, i_peak);
+            fclose(f);
+            printf("  Tc(N=%d) ~ %.6f (Cv_max=%.4f, peak at T[%d]=%.6f)\n",
+                   N, Tc, Cv_max, i_peak, temps[i_peak]);
+            printf("  Written %s\n", fname);
+        }
+    }
+
+    // ================================================================
+    // Kurtosis (Binder g4) crossing point
+    // ================================================================
+    if (nrep > 1) {
+        printf("\n── Binder g4 crossing analysis ─────────────────────\n");
+
+        // Read glass_obs.dat to get g4 vs T
+        char gofile[512];
+        snprintf(gofile, sizeof(gofile), "%s/glass_obs.dat", outdir);
+        FILE* fin = fopen(gofile, "r");
+        if (fin) {
+            std::vector<double> Tg, g4v;
+            char line[1024];
+            while (fgets(line, sizeof(line), fin)) {
+                if (line[0] == '#') continue;
+                double T, chi, chi_err, g4_val, g4_err, A, A_err;
+                if (sscanf(line, "%lf\t%lf\t%lf\t%lf\t%lf\t%lf\t%lf",
+                           &T, &chi, &chi_err, &g4_val, &g4_err, &A, &A_err) >= 4) {
+                    Tg.push_back(T);
+                    g4v.push_back(g4_val);
+                }
+            }
+            fclose(fin);
+
+            // g4 crossing: find where g4 crosses specific reference value
+            // For a p-spin glass, the crossing point at Tc is where
+            // g4(N1, T) = g4(N2, T). For single-N, report g4 inflection.
+            // Here we just find where g4 departs from its infinite-T value (1).
+            // Look for maximum slope (steepest descent)
+            int n_g = (int)Tg.size();
+            if (n_g >= 3) {
+                double max_slope = 0;
+                int i_inflect = 0;
+                for (int i = 1; i < n_g - 1; i++) {
+                    double slope = fabs((g4v[i+1] - g4v[i-1]) / (Tg[i+1] - Tg[i-1]));
+                    if (slope > max_slope) { max_slope = slope; i_inflect = i; }
+                }
+
+                char fname[512];
+                snprintf(fname, sizeof(fname), "%s/g4_inflection.dat", outdir);
+                FILE* f = fopen(fname, "w");
+                if (f) {
+                    fprintf(f, "# Binder g4 inflection analysis\n");
+                    fprintf(f, "# N=%d\n", N);
+                    fprintf(f, "# T_inflection\tg4_at_inflection\tmax_slope\n");
+                    fprintf(f, "%.8f\t%.8e\t%.8e\n", Tg[i_inflect], g4v[i_inflect], max_slope);
+                    fclose(f);
+                    printf("  g4 inflection at T ~ %.6f (g4=%.4f, slope=%.4f)\n",
+                           Tg[i_inflect], g4v[i_inflect], max_slope);
+                    printf("  Written %s\n", fname);
+                }
+            }
+        } else {
+            printf("  glass_obs.dat not found — run overlap analysis first\n");
+        }
+    }
+
+    // ================================================================
+    // Multi-overlap scatter plots (q vs q_phi, IFO vs q, q_phi vs q_link)
+    // ================================================================
+    if (nrep >= 2) {
+        printf("\n── Multi-overlap scatter (threads=%d) ──────────────\n", nthreads);
+
+        struct MultiOvlPt { double q, q_phi, ifo; };
+        std::vector<std::vector<MultiOvlPt>> pts_per_ti(ntemps);
+        std::vector<std::mutex> mtx_pts(ntemps);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+                    int tidx = all_data[ref][ti].tidx;
+
+                    auto iters0 = cstore.get_iters(tidx, 0);
+                    std::set<int> common(iters0.begin(), iters0.end());
+                    for (int r = 1; r < nrep; r++) {
+                        auto it_r = cstore.get_iters(tidx, r);
+                        std::set<int> s_r(it_r.begin(), it_r.end());
+                        std::set<int> tmp;
+                        std::set_intersection(common.begin(), common.end(),
+                                              s_r.begin(), s_r.end(),
+                                              std::inserter(tmp, tmp.begin()));
+                        common = tmp;
+                    }
+                    std::vector<int> c_iters(common.begin(), common.end());
+                    if (c_iters.empty()) continue;
+
+                    std::vector<MultiOvlPt> local_pts;
+
+                    for (int ra = 0; ra < nrep; ra++)
+                        for (int rb = ra + 1; rb < nrep; rb++) {
+                            std::vector<double> meanIa(N,0), meanIb(N,0);
+                            int nit = (int)c_iters.size();
+                            for (int it : c_iters) {
+                                auto* ea = cstore.find_entry(tidx, ra, it);
+                                auto* eb = cstore.find_entry(tidx, rb, it);
+                                if (!ea || !eb) continue;
+                                for (int k = 0; k < N; k++) {
+                                    double ra_ = ea->data[2*k], ia_ = ea->data[2*k+1];
+                                    double rb_ = eb->data[2*k], ib_ = eb->data[2*k+1];
+                                    meanIa[k] += ra_*ra_ + ia_*ia_;
+                                    meanIb[k] += rb_*rb_ + ib_*ib_;
+                                }
+                            }
+                            for (int k = 0; k < N; k++) { meanIa[k] /= nit; meanIb[k] /= nit; }
+
+                            for (int it : c_iters) {
+                                auto* ea = cstore.find_entry(tidx, ra, it);
+                                auto* eb = cstore.find_entry(tidx, rb, it);
+                                if (!ea || !eb) continue;
+
+                                double num_q = 0, n1q = 0, n2q = 0;
+                                double num_qp = 0;
+                                int cnt_qp = 0;
+                                double num_ifo = 0, d1_ifo = 0, d2_ifo = 0;
+
+                                for (int k = 0; k < N; k++) {
+                                    double ra_ = ea->data[2*k], ia_ = ea->data[2*k+1];
+                                    double rb_ = eb->data[2*k], ib_ = eb->data[2*k+1];
+                                    double Ia = ra_*ra_ + ia_*ia_;
+                                    double Ib = rb_*rb_ + ib_*ib_;
+
+                                    num_q += ra_*rb_ + ia_*ib_;
+                                    n1q += Ia; n2q += Ib;
+
+                                    if (Ia > 1e-20 && Ib > 1e-20) {
+                                        double ma = sqrt(Ia), mb = sqrt(Ib);
+                                        num_qp += (ra_*rb_ + ia_*ib_) / (ma * mb);
+                                        cnt_qp++;
+                                    }
+
+                                    double dIa = Ia - meanIa[k];
+                                    double dIb = Ib - meanIb[k];
+                                    num_ifo += dIa * dIb;
+                                    d1_ifo += dIa * dIa;
+                                    d2_ifo += dIb * dIb;
+                                }
+
+                                double nrm = sqrt(n1q * n2q);
+                                double q_val = (nrm > 0) ? num_q / nrm : 0.0;
+                                double qp_val = (cnt_qp > 0) ? num_qp / cnt_qp : 0.0;
+                                double ifo_denom = sqrt(d1_ifo * d2_ifo);
+                                double ifo_val = (ifo_denom > 0) ? num_ifo / ifo_denom : 0.0;
+
+                                local_pts.push_back({q_val, qp_val, ifo_val});
+                            }
+                        }
+
+                    if (!local_pts.empty()) {
+                        std::lock_guard<std::mutex> lk(mtx_pts[ti]);
+                        pts_per_ti[ti].insert(pts_per_ti[ti].end(),
+                                              local_pts.begin(), local_pts.end());
+                    }
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+            for (auto& th : threads) th.join();
+            printf("  Sample S%d done\n", labels[s]);
+        }
+
+        // Write per-temperature files
+        for (int ti = 0; ti < ntemps; ti++) {
+            auto& pts = pts_per_ti[ti];
+            if (pts.empty()) continue;
+
+            // Downsample
+            int max_pts = 5000;
+            if ((int)pts.size() > max_pts) {
+                std::mt19937 rng(42 + ti);
+                for (int i = 0; i < max_pts; i++) {
+                    std::uniform_int_distribution<int> dist(i, (int)pts.size() - 1);
+                    std::swap(pts[i], pts[dist(rng)]);
+                }
+                pts.resize(max_pts);
+            }
+
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/multi_overlap_T%.4f.dat", outdir, temps[ti]);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Multi-overlap scatter at T=%.6f\n", temps[ti]);
+                fprintf(f, "# q_parisi\tq_phase\tIFO\n");
+                for (auto& p : pts)
+                    fprintf(f, "%.8e\t%.8e\t%.8e\n", p.q, p.q_phi, p.ifo);
+                fclose(f);
+            }
+        }
+        printf("  Written multi-overlap scatter files\n");
     }
 
     // ================================================================
@@ -3043,6 +4358,7 @@ int main(int argc, char** argv) {
             if (any) {
                 // chi panel
                 Plot2D pChi; setup_analysis_plot(pChi);
+                pChi.gnuplot("set title '{/Helvetica-Bold Susceptibility {/Symbol c}}'");
                 pChi.gnuplot("set logscale x 10");
                 pChi.xlabel("{/Helvetica-Oblique T}");
                 pChi.ylabel("{/Symbol c}");
@@ -3062,6 +4378,7 @@ int main(int argc, char** argv) {
 
                 // g4 panel
                 Plot2D pG4; setup_analysis_plot(pG4);
+                pG4.gnuplot("set title '{/Helvetica-Bold Binder parameter g_4}'");
                 pG4.gnuplot("set logscale x 10");
                 pG4.xlabel("{/Helvetica-Oblique T}");
                 pG4.ylabel("{/Helvetica-Oblique g}_4");
@@ -3081,6 +4398,7 @@ int main(int argc, char** argv) {
 
                 // A panel
                 Plot2D pA; setup_analysis_plot(pA);
+                pA.gnuplot("set title '{/Helvetica-Bold Non-self-averaging A}'");
                 pA.gnuplot("set logscale x 10");
                 pA.xlabel("{/Helvetica-Oblique T}");
                 pA.ylabel("{/Helvetica-Oblique A}({/Helvetica-Oblique T})");
@@ -3098,9 +4416,67 @@ int main(int argc, char** argv) {
                     pA.drawCurve(vT, vA).lineColor(gcols[i]).lineWidth(2).label(gnames[i]);
                 }
 
-                Figure fig = {{pChi, pG4, pA}};
+                // Scatter panel: q_parisi vs q_link
+                Plot2D pScat; setup_analysis_plot(pScat);
+                pScat.gnuplot("set title '{/Helvetica-Bold Scatter q vs q_{link}}'");
+                pScat.xlabel("{/Helvetica-Oblique q}_{Parisi}");
+                pScat.ylabel("{/Helvetica-Oblique q}_{link}");
+                bool has_scatter = false;
+                {
+                    char sf[512]; snprintf(sf, sizeof(sf), "%s/scatter_q_qlink.dat", outdir);
+                    FILE* fscat = fopen(sf, "r");
+                    if (fscat) {
+                        // Group points by temperature
+                        struct SPt { double q, ql, T; };
+                        std::vector<SPt> allpts;
+                        char line[512];
+                        while (fgets(line, sizeof(line), fscat)) {
+                            if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+                            SPt p;
+                            if (sscanf(line, "%lf %lf %lf", &p.q, &p.ql, &p.T) == 3)
+                                allpts.push_back(p);
+                        }
+                        fclose(fscat);
+                        if (!allpts.empty()) {
+                            has_scatter = true;
+                            // Find T range
+                            double Tmin = allpts[0].T, Tmax = allpts[0].T;
+                            for (auto& p : allpts) {
+                                if (p.T < Tmin) Tmin = p.T;
+                                if (p.T > Tmax) Tmax = p.T;
+                            }
+                            pScat.gnuplot("set rmargin 14");
+                            pScat.gnuplot(TEMP_PALETTE);
+                            char cbr[128];
+                            snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
+                            pScat.gnuplot(cbr);
+                            pScat.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,13' offset 1,0");
+                            pScat.gnuplot("set cbtics font 'Helvetica,11'");
+                            pScat.gnuplot("set colorbox vertical user origin 0.88, 0.15 size 0.025, 0.7");
+                            pScat.legend().hide();
+                            // Group by unique T
+                            std::map<double,std::vector<SPt>> byT;
+                            for (auto& p : allpts) byT[p.T].push_back(p);
+                            for (auto& [T, pts] : byT) {
+                                std::vector<double> vq, vql;
+                                for (auto& p : pts) { vq.push_back(p.q); vql.push_back(p.ql); }
+                                char pcol[64];
+                                snprintf(pcol, sizeof(pcol), "palette cb %.8f", T);
+                                pScat.drawPoints(vq, vql)
+                                    .lineColor(pcol)
+                                    .pointType(7).pointSize(1)
+                                    .label("");
+                            }
+                        }
+                    }
+                }
+                if (!has_scatter) {
+                    pScat.legend().hide();
+                }
+
+                Figure fig = {{pChi, pG4}, {pA, pScat}};
                 Canvas canvas = {{fig}};
-                canvas.size(1800, 600);
+                canvas.size(1600, 1200);
                 char pf[512]; snprintf(pf, sizeof(pf), "%s/glass_observables.png", plotdir);
                 canvas.save(pf);
                 printf("  Written %s\n", pf);
@@ -3162,6 +4538,350 @@ int main(int argc, char** argv) {
                 Canvas canvas = {{fig}};
                 canvas.size(1400, 500);
                 char pf[512]; snprintf(pf, sizeof(pf), "%s/ipr.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Equipartition parameter EP(T) ---
+        {
+            struct EPLine { double T, ep, eperr; };
+            std::vector<EPLine> ep_rows;
+            char epfile[512]; snprintf(epfile, sizeof(epfile), "%s/ep.dat", outdir);
+            FILE* f = fopen(epfile, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    EPLine r;
+                    if (sscanf(line, "%lf %lf %lf", &r.T, &r.ep, &r.eperr) == 3)
+                        ep_rows.push_back(r);
+                }
+                fclose(f);
+            }
+            if (!ep_rows.empty()) {
+                std::vector<double> vT, vEP, vLo, vHi;
+                for (auto& r : ep_rows) {
+                    vT.push_back(r.T); vEP.push_back(r.ep);
+                    vLo.push_back(r.ep - r.eperr); vHi.push_back(r.ep + r.eperr);
+                }
+                Plot2D plot; setup_analysis_plot(plot);
+                if (log_temp) plot.gnuplot("set logscale x 10");
+                plot.xlabel("{/Helvetica-Oblique T}");
+                plot.ylabel("{/Helvetica-Oblique EP}");
+                plot.legend().hide();
+                plot.drawCurvesFilled(vT, vLo, vHi)
+                    .fillColor("#984ea3").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#984ea3").lineWidth(0).labelNone();
+                plot.drawCurve(vT, vEP).lineColor("#984ea3").lineWidth(2).label("");
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/equipartition.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Shannon Entropy & Gini ---
+        {
+            struct SGLine { double T, S, Serr, G, Gerr; };
+            std::vector<SGLine> sg_rows;
+            char sgfile[512]; snprintf(sgfile, sizeof(sgfile), "%s/entropy_gini.dat", outdir);
+            FILE* f = fopen(sgfile, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    SGLine r;
+                    if (sscanf(line, "%lf %lf %lf %lf %lf",
+                               &r.T, &r.S, &r.Serr, &r.G, &r.Gerr) == 5)
+                        sg_rows.push_back(r);
+                }
+                fclose(f);
+            }
+            if (!sg_rows.empty()) {
+                std::vector<double> vT, vS, vSlo, vShi, vG, vGlo, vGhi;
+                for (auto& r : sg_rows) {
+                    vT.push_back(r.T);
+                    vS.push_back(r.S); vSlo.push_back(r.S - r.Serr); vShi.push_back(r.S + r.Serr);
+                    vG.push_back(r.G); vGlo.push_back(r.G - r.Gerr); vGhi.push_back(r.G + r.Gerr);
+                }
+                Plot2D pS; setup_analysis_plot(pS);
+                if (log_temp) pS.gnuplot("set logscale x 10");
+                pS.xlabel("{/Helvetica-Oblique T}");
+                pS.ylabel("Shannon entropy  {/Helvetica-Oblique S}");
+                pS.legend().hide();
+                pS.drawCurvesFilled(vT, vSlo, vShi)
+                    .fillColor("#4daf4a").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#4daf4a").lineWidth(0).labelNone();
+                pS.drawCurve(vT, vS).lineColor("#4daf4a").lineWidth(2).label("");
+
+                Plot2D pG; setup_analysis_plot(pG);
+                if (log_temp) pG.gnuplot("set logscale x 10");
+                pG.xlabel("{/Helvetica-Oblique T}");
+                pG.ylabel("Gini coefficient  {/Helvetica-Oblique G}");
+                pG.legend().hide();
+                pG.drawCurvesFilled(vT, vGlo, vGhi)
+                    .fillColor("#ff7f00").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#ff7f00").lineWidth(0).labelNone();
+                pG.drawCurve(vT, vG).lineColor("#ff7f00").lineWidth(2).label("");
+
+                Figure fig = {{pS, pG}};
+                Canvas canvas = {{fig}};
+                canvas.size(1400, 500);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/entropy_gini.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Non-self-averaging A_E ---
+        {
+            struct AELine { double T, A, Aerr; };
+            std::vector<AELine> ae_rows;
+            char aefile[512]; snprintf(aefile, sizeof(aefile), "%s/nsa_energy.dat", outdir);
+            FILE* f = fopen(aefile, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    AELine r;
+                    if (sscanf(line, "%lf %lf %lf", &r.T, &r.A, &r.Aerr) == 3)
+                        ae_rows.push_back(r);
+                }
+                fclose(f);
+            }
+            if (!ae_rows.empty()) {
+                std::vector<double> vT, vA, vLo, vHi;
+                for (auto& r : ae_rows) {
+                    vT.push_back(r.T); vA.push_back(r.A);
+                    vLo.push_back(r.A - r.Aerr); vHi.push_back(r.A + r.Aerr);
+                }
+                Plot2D plot; setup_analysis_plot(plot);
+                if (log_temp) plot.gnuplot("set logscale x 10");
+                plot.xlabel("{/Helvetica-Oblique T}");
+                plot.ylabel("{/Helvetica-Oblique A}_E (non-self-averaging)");
+                plot.legend().hide();
+                plot.drawCurvesFilled(vT, vLo, vHi)
+                    .fillColor("#a65628").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#a65628").lineWidth(0).labelNone();
+                plot.drawCurve(vT, vA).lineColor("#a65628").lineWidth(2).label("");
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/nsa_energy.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Decorrelation time tau_E ---
+        {
+            struct TauLine { double T, tau, tauerr; };
+            std::vector<TauLine> tau_rows;
+            char taufile[512]; snprintf(taufile, sizeof(taufile), "%s/decorrelation_time.dat", outdir);
+            FILE* f = fopen(taufile, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    TauLine r;
+                    if (sscanf(line, "%lf %lf %lf", &r.T, &r.tau, &r.tauerr) == 3)
+                        tau_rows.push_back(r);
+                }
+                fclose(f);
+            }
+            if (!tau_rows.empty()) {
+                std::vector<double> vT, vTau, vLo, vHi;
+                for (auto& r : tau_rows) {
+                    vT.push_back(r.T); vTau.push_back(r.tau);
+                    vLo.push_back(r.tau - r.tauerr); vHi.push_back(r.tau + r.tauerr);
+                }
+                Plot2D plot; setup_analysis_plot(plot);
+                if (log_temp) plot.gnuplot("set logscale x 10");
+                plot.xlabel("{/Helvetica-Oblique T}");
+                plot.ylabel("{/Symbol t}_E  (decorrelation time)");
+                plot.legend().hide();
+                plot.drawCurvesFilled(vT, vLo, vHi)
+                    .fillColor("#e41a1c").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#e41a1c").lineWidth(0).labelNone();
+                plot.drawCurve(vT, vTau).lineColor("#e41a1c").lineWidth(2).label("");
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/decorrelation_time.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- E2/E4 energy split ---
+        {
+            struct ESLine { double T, e2, e2err, e4, e4err; };
+            std::vector<ESLine> es_rows;
+            char esfile[512]; snprintf(esfile, sizeof(esfile), "%s/energy_split.dat", outdir);
+            FILE* f = fopen(esfile, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    ESLine r;
+                    if (sscanf(line, "%lf %lf %lf %lf %lf",
+                               &r.T, &r.e2, &r.e2err, &r.e4, &r.e4err) == 5)
+                        es_rows.push_back(r);
+                }
+                fclose(f);
+            }
+            if (!es_rows.empty()) {
+                std::vector<double> vT, v2, v2lo, v2hi, v4, v4lo, v4hi;
+                for (auto& r : es_rows) {
+                    vT.push_back(r.T);
+                    v2.push_back(r.e2); v2lo.push_back(r.e2 - r.e2err); v2hi.push_back(r.e2 + r.e2err);
+                    v4.push_back(r.e4); v4lo.push_back(r.e4 - r.e4err); v4hi.push_back(r.e4 + r.e4err);
+                }
+                Plot2D plot; setup_analysis_plot(plot);
+                if (log_temp) plot.gnuplot("set logscale x 10");
+                plot.xlabel("{/Helvetica-Oblique T}");
+                plot.ylabel("{/Helvetica-Oblique E/N}");
+                plot.drawCurvesFilled(vT, v2lo, v2hi)
+                    .fillColor("#377eb8").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#377eb8").lineWidth(0).labelNone();
+                plot.drawCurve(vT, v2).lineColor("#377eb8").lineWidth(2).label("E_2/N");
+                plot.drawCurvesFilled(vT, v4lo, v4hi)
+                    .fillColor("#e41a1c").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#e41a1c").lineWidth(0).labelNone();
+                plot.drawCurve(vT, v4).lineColor("#e41a1c").lineWidth(2).label("E_4/N");
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/energy_split.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Autocorrelation C(tau) ---
+        {
+            // Plot all available autocorrelation files
+            Plot2D plot; setup_analysis_plot(plot);
+            plot.xlabel("{/Symbol t}  (lag)");
+            plot.ylabel("{/Helvetica-Oblique C}({/Symbol t})");
+            const char* acols[] = {"#e41a1c","#377eb8","#4daf4a","#984ea3","#ff7f00"};
+            int nac = 0;
+            for (int ti = 0; ti < ntemps && nac < 5; ti++) {
+                int tsel[] = { 0, ntemps / 4, ntemps / 2, 3 * ntemps / 4, ntemps - 1 };
+                bool found = false;
+                for (int tt = 0; tt < 5 && !found; tt++)
+                    if (tsel[tt] == ti) found = true;
+                if (!found) continue;
+
+                char acfile[512];
+                snprintf(acfile, sizeof(acfile), "%s/autocorr_T%.4f.dat", outdir, temps[ti]);
+                FILE* f = fopen(acfile, "r");
+                if (!f) continue;
+
+                std::vector<double> vlags, vC;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    int lag; double C, Cerr;
+                    if (sscanf(line, "%d %lf %lf", &lag, &C, &Cerr) >= 2) {
+                        vlags.push_back(lag); vC.push_back(C);
+                    }
+                }
+                fclose(f);
+                if (!vlags.empty()) {
+                    char lbl[64]; snprintf(lbl, sizeof(lbl), "T=%.3f", temps[ti]);
+                    plot.drawCurve(vlags, vC)
+                        .lineColor(acols[nac % 5]).lineWidth(2).label(lbl);
+                    nac++;
+                }
+            }
+            if (nac > 0) {
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/autocorrelation.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Mode-mode eigenvalue spectrum ---
+        {
+            const char* tnames_mm[] = { "hot", "mid", "cold" };
+            const char* ecols[] = {"#e41a1c", "#4daf4a", "#377eb8"};
+            Plot2D plot; setup_analysis_plot(plot);
+            plot.xlabel("Eigenvalue index");
+            plot.ylabel("{/Symbol l} / {/Helvetica-Oblique N}");
+            plot.gnuplot("set logscale y 10");
+            int nec = 0;
+            for (int tt = 0; tt < 3; tt++) {
+                char evfile[512];
+                snprintf(evfile, sizeof(evfile), "%s/eigvals_%s.dat", outdir, tnames_mm[tt]);
+                FILE* f = fopen(evfile, "r");
+                if (!f) continue;
+                std::vector<double> vi, vl;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    int idx; double lam, lamN;
+                    if (sscanf(line, "%d %lf %lf", &idx, &lam, &lamN) == 3) {
+                        vi.push_back(idx); vl.push_back(lamN);
+                    }
+                }
+                fclose(f);
+                if (!vi.empty()) {
+                    plot.drawCurve(vi, vl).lineColor(ecols[tt]).lineWidth(2).label(tnames_mm[tt]);
+                    nec++;
+                }
+            }
+            if (nec > 0) {
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/eigvals.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- Mode-frequency correlation scatter ---
+        {
+            const char* mfnames[] = { "hot", "cold" };
+            const char* mfcols[] = { "#e41a1c", "#377eb8" };
+            Plot2D plot; setup_analysis_plot(plot);
+            plot.xlabel("{/Symbol w}_k");
+            plot.ylabel("<{/Helvetica-Oblique I}_k>");
+            int nmc = 0;
+            for (int tt = 0; tt < 2; tt++) {
+                char mffile[512];
+                snprintf(mffile, sizeof(mffile), "%s/mode_freq_corr_%s.dat", outdir, mfnames[tt]);
+                FILE* f = fopen(mffile, "r");
+                if (!f) continue;
+                std::vector<double> vw, vI;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    double w, I;
+                    if (sscanf(line, "%lf %lf", &w, &I) == 2) {
+                        vw.push_back(w); vI.push_back(I);
+                    }
+                }
+                fclose(f);
+                if (!vw.empty()) {
+                    char lbl[64]; snprintf(lbl, sizeof(lbl), "T=%s", mfnames[tt]);
+                    plot.drawPoints(vw, vI)
+                        .lineColor(mfcols[tt]).pointType(7).pointSize(0.8).label(lbl);
+                    nmc++;
+                }
+            }
+            if (nmc > 0) {
+                Figure fig = {{plot}};
+                Canvas canvas = {{fig}};
+                canvas.size(900, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/mode_freq_corr.png", plotdir);
                 canvas.save(pf);
                 printf("  Written %s\n", pf);
             }
