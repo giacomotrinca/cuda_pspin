@@ -398,17 +398,31 @@ int main(int argc, char** argv) {
                 double ex_hot  = (t_hot < NT - 1 && ex_prop_total[t_hot] > 0)
                     ? (double)ex_acc_total[t_hot] / ex_prop_total[t_hot] : 0.0;
 
+                // Mean MC acceptance over real replicas at each temperature
+                auto mean_mc_acc = [&](int tidx) {
+                    double sum = 0;
+                    for (int r = 0; r < nrep_per_temp; r++) {
+                        int ph = perm[tidx * nrep_per_temp + r];
+                        sum += (h_proposed[ph] > 0)
+                            ? (double)h_accepted[ph] / h_proposed[ph] : 0.0;
+                    }
+                    return sum / nrep_per_temp;
+                };
+                double mc_cold = mean_mc_acc(t_cold);
+                double mc_mid  = mean_mc_acc(t_mid);
+                double mc_hot  = mean_mc_acc(t_hot);
+
                 struct timespec t_now;
                 clock_gettime(CLOCK_MONOTONIC, &t_now);
                 double elapsed_now = (t_now.tv_sec - t_start.tv_sec)
                                    + (t_now.tv_nsec - t_start.tv_nsec) * 1e-9;
                 double avg_s_per_it = elapsed_now / (s + 1);
 
-                printf("  %6d  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e  E/N[%d]=% .3e ex=% .3e  [%.2e s/it]\n",
+                printf("  %6d  E/N[%d]=% .3e ex=%.3f mc=%.3f  E/N[%d]=% .3e ex=%.3f mc=%.3f  E/N[%d]=% .3e ex=%.3f mc=%.3f  [%.2e s/it]\n",
                        s + 1,
-                       t_cold, h_energies[phys_cold] / cfg.N, ex_cold,
-                       t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,
-                       t_hot,  h_energies[phys_hot]  / cfg.N, ex_hot,
+                       t_cold, h_energies[phys_cold] / cfg.N, ex_cold, mc_cold,
+                       t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,  mc_mid,
+                       t_hot,  h_energies[phys_hot]  / cfg.N, ex_hot,  mc_hot,
                        avg_s_per_it);
             } else if (cfg.verbose == 1) {
                 int phys_cold = perm[(NT - 1) * nrep_per_temp];

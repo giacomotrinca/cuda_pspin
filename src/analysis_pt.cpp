@@ -522,7 +522,7 @@ int main(int argc, char** argv) {
         nthreads = (int)std::thread::hardware_concurrency();
     if (nthreads < 1) nthreads = 1;
     if (N < 4 || NT < 2) usage(argv[0]);
-    if (nbins_spec <= 0) nbins_spec = N;
+    if (nbins_spec <= 0) nbins_spec = nbins;
 
     auto labels = find_samples(N, NT, nrep, prefix);
     if (labels.empty()) {

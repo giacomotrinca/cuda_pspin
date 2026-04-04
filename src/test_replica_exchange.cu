@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
         if (frates) fprintf(frates, "# T_high T_low rate\n");
         snprintf(path, sizeof(path), "%s/exchange_walk.dat", outdir);
         fwalk = fopen(path, "w");
-        if (fwalk) fprintf(fwalk, "# sweep replica temp_idx\n");
+        if (fwalk) fprintf(fwalk, "# sweep replica T\n");
     }
 
     // Temperature schedule (linear)
@@ -152,8 +152,8 @@ int main(int argc, char** argv) {
             if (fwalk) {
                 for (int t = 0; t < NT; t++)
                     for (int rr = 0; rr < nrep_per_temp; rr++)
-                        fprintf(fwalk, "%d %d %d\n",
-                                s + 1, perm[t * nrep_per_temp + rr], t);
+                        fprintf(fwalk, "%d %d %.4f\n",
+                                s + 1, perm[t * nrep_per_temp + rr], T_sched[t]);
             }
         }
     }

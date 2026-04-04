@@ -108,11 +108,13 @@ __global__ void mc_sweep_kernel(
         cur_energy = energies[rep];
     }
 
-    // H4 work counts (constant for the sweep)
-    int Nm2 = N - 2;
-    long long n_type12 = (long long)Nm2 * (Nm2 - 1) * (Nm2 - 2) / 6; // C(N-2,3)
-    long long n_type3  = (long long)Nm2 * (Nm2 - 1) / 2;             // C(N-2,2)
-    long long n_h4     = 2 * n_type12 + n_type3;
+    // Three-type enumeration work counts:
+    //   Type 1: {i0, a, b, c}  with a<b<c from {0..N-1}\{i0,j0}  → C(N-2,3) quartets
+    //   Type 2: {j0, a, b, c}  same count
+    //   Type 3: {i0, j0, a, b} with a<b from {0..N-1}\{i0,j0}    → C(N-2,2) quartets
+    long long n_type12 = (long long)(N - 2) * (N - 3) * (N - 4) / 6;  // C(N-2,3)
+    long long n_type3  = (long long)(N - 2) * (N - 3) / 2;            // C(N-2,2)
+    long long n_h4     = 2 * n_type12 + n_type3;  // total involved quartets
 
     // Conjugation masks per channel (bit p set = position p conjugated)
     // ch 0: conj {kk,ll}  mask=0xC   ch 1: conj {jj,kk} mask=0x6   ch 2: conj {jj,ll} mask=0xA
@@ -177,10 +179,9 @@ __global__ void mc_sweep_kernel(
             }
         }
 
-        // --- H4: three-type enumeration with differential for Types 1&2 ---
+        // --- H4: three-type enumeration, full old/new for all types ---
         for (long long t = tid; t < n_h4; t += bdim) {
             int idx[4];
-            int is_type3 = 0;
 
             if (t < n_type12) {
                 // Type 1: {i0, a, b, c}  a<b<c from {0..N-1}\{i0,j0}
@@ -218,7 +219,6 @@ __global__ void mc_sweep_kernel(
                 idx[0] = j0; idx[1] = a; idx[2] = b; idx[3] = c;
             } else {
                 // Type 3: {i0, j0, a, b}  a<b from {0..N-1}\{i0,j0}
-                is_type3 = 1;
                 long long tt = t - 2 * n_type12;
                 int bb = (int)sqrt(2.0 * (double)tt);
                 if (bb < 1) bb = 1;
@@ -254,37 +254,23 @@ __global__ void mc_sweep_kernel(
 
                 int cm = conj_masks[ch];
 
-                if (is_type3) {
-                    // Both i0 and j0 change: full old & new
-                    int ids[4] = {ii, jj, kk, ll};
-                    cuDoubleComplex old_f[4], new_f[4];
-                    for (int p = 0; p < 4; p++) {
-                        cuDoubleComplex oval = s_spins[ids[p]];
-                        cuDoubleComplex nval;
-                        if (ids[p] == i0)      nval = a_i_new;
-                        else if (ids[p] == j0) nval = a_j_new;
-                        else                   nval = oval;
-                        old_f[p] = ((cm >> p) & 1) ? cuConj(oval) : oval;
-                        new_f[p] = ((cm >> p) & 1) ? cuConj(nval) : nval;
-                    }
-                    cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(old_f[0], old_f[1]),
-                                                                 cuCmul(old_f[2], old_f[3])));
-                    cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(new_f[0], new_f[1]),
-                                                                 cuCmul(new_f[2], new_f[3])));
-                    local_dE -= (cuCreal(new_prod) - cuCreal(old_prod));
-                } else {
-                    // Single spin changes: differential
-                    int changed = (t < n_type12) ? i0 : j0;
-                    cuDoubleComplex delta = (changed == i0) ? delta_i : delta_j;
-                    int ids[4] = {ii, jj, kk, ll};
-                    cuDoubleComplex f[4];
-                    for (int p = 0; p < 4; p++) {
-                        cuDoubleComplex base = (ids[p] == changed) ? delta : s_spins[ids[p]];
-                        f[p] = ((cm >> p) & 1) ? cuConj(base) : base;
-                    }
-                    cuDoubleComplex diff = cuCmul(gq, cuCmul(cuCmul(f[0], f[1]), cuCmul(f[2], f[3])));
-                    local_dE -= cuCreal(diff);
+                // Full old/new computation for all types
+                int ids[4] = {ii, jj, kk, ll};
+                cuDoubleComplex old_f[4], new_f[4];
+                for (int p = 0; p < 4; p++) {
+                    cuDoubleComplex oval = s_spins[ids[p]];
+                    cuDoubleComplex nval;
+                    if (ids[p] == i0)      nval = a_i_new;
+                    else if (ids[p] == j0) nval = a_j_new;
+                    else                   nval = oval;
+                    old_f[p] = ((cm >> p) & 1) ? cuConj(oval) : oval;
+                    new_f[p] = ((cm >> p) & 1) ? cuConj(nval) : nval;
                 }
+                cuDoubleComplex old_prod = cuCmul(gq, cuCmul(cuCmul(old_f[0], old_f[1]),
+                                                             cuCmul(old_f[2], old_f[3])));
+                cuDoubleComplex new_prod = cuCmul(gq, cuCmul(cuCmul(new_f[0], new_f[1]),
+                                                             cuCmul(new_f[2], new_f[3])));
+                local_dE -= (cuCreal(new_prod) - cuCreal(old_prod));
             } // end channel loop
         }
 

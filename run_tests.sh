@@ -15,6 +15,7 @@
 # ===========================================================================
 
 set -e
+set -o pipefail
 
 # ── parse --dev=N ──────────────────────────────────────────────────────────
 DEV=0
@@ -298,19 +299,19 @@ fi
 
 if [ -s "${OUTDIR}/exchange_walk.dat" ]; then
 cat > "${OUTDIR}/_walk.gp" <<WALKEOF
-set terminal pngcairo size 1200,800 enhanced font "Helvetica,14" lw 2
+set terminal pngcairo size 1400,600 enhanced font "Helvetica,14" lw 2
 set output "${OUTDIR}/plot_exchange_walk.png"
 set grid lc rgb "#e0e0e0" lt 1
 set border lw 1.5
 set title "Test 7b: Temperature Random Walk — GPU: ${GPU_RAW}" font ",16"
 set xlabel "MC sweep"
-set ylabel "Temperature index"
+set ylabel "Temperature T"
 set key top right box opaque
-set yrange [-0.5:5.5]
-set ytics 0,1,5
-plot "< awk 'NR>1 && \$2==0 {print \$1, \$3}' ${OUTDIR}/exchange_walk.dat" u 1:2 w lines lw 1.8 lc rgb "#2980b9" t "replica 0", \
-     "< awk 'NR>1 && \$2==1 {print \$1, \$3}' ${OUTDIR}/exchange_walk.dat" u 1:2 w lines lw 1.8 lc rgb "#e74c3c" t "replica 1", \
-     "< awk 'NR>1 && \$2==2 {print \$1, \$3}' ${OUTDIR}/exchange_walk.dat" u 1:2 w lines lw 1.8 lc rgb "#27ae60" t "replica 2"
+set yrange [0.35:2.15]
+set ytics ("0.5" 0.5, "0.8" 0.8, "1.1" 1.1, "1.4" 1.4, "1.7" 1.7, "2.0" 2.0)
+plot "< awk 'NR>1 && \$2==0 && (NR%20==0) {print \$1, \$3}' ${OUTDIR}/exchange_walk.dat" u 1:2 w steps lw 1.4 lc rgb "#2980b9" t "replica 0", \
+     "< awk 'NR>1 && \$2==1 && (NR%20==0) {print \$1, \$3}' ${OUTDIR}/exchange_walk.dat" u 1:2 w steps lw 1.4 lc rgb "#e74c3c" t "replica 1", \
+     "< awk 'NR>1 && \$2==2 && (NR%20==0) {print \$1, \$3}' ${OUTDIR}/exchange_walk.dat" u 1:2 w steps lw 1.4 lc rgb "#27ae60" t "replica 2"
 WALKEOF
 gnuplot "${OUTDIR}/_walk.gp"
 rm -f "${OUTDIR}/_walk.gp"

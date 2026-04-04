@@ -142,6 +142,8 @@ static int optimal_bs_h2() {
     int mg; cudaOccupancyMaxPotentialBlockSize(&mg, &bs, energy_h2_kernel,
         (size_t)0, 0);
     if (bs < 32) bs = 32;
+    // Round down to nearest power of 2: tree reduction requires it
+    int p = 32; while (p * 2 <= bs) p *= 2; bs = p;
     return bs;
 }
 static int optimal_bs_h4() {
@@ -150,6 +152,8 @@ static int optimal_bs_h4() {
     int mg; cudaOccupancyMaxPotentialBlockSize(&mg, &bs, energy_h4_kernel,
         (size_t)0, 0);
     if (bs < 32) bs = 32;
+    // Round down to nearest power of 2: tree reduction requires it
+    int p = 32; while (p * 2 <= bs) p *= 2; bs = p;
     return bs;
 }
 
