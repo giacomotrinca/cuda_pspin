@@ -418,7 +418,7 @@ int main(int argc, char** argv) {
                                    + (t_now.tv_nsec - t_start.tv_nsec) * 1e-9;
                 double avg_s_per_it = elapsed_now / (s + 1);
 
-                printf("  %6d  E/N[%d]=% .3e ex=%.3f mc=%.3f  E/N[%d]=% .3e ex=%.3f mc=%.3f  E/N[%d]=% .3e ex=%.3f mc=%.3f  [%.2e s/it]\n",
+                printf("  %6d  E/N[%d]=% .3e ex=%.2e mc=%.2e  E/N[%d]=% .3e ex=%.2e mc=%.2e  E/N[%d]=% .3e ex=%.2e mc=%.2e  [%.2e s/it]\n",
                        s + 1,
                        t_cold, h_energies[phys_cold] / cfg.N, ex_cold, mc_cold,
                        t_mid,  h_energies[phys_mid]  / cfg.N, ex_mid,  mc_mid,

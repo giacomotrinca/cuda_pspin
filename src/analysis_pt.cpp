@@ -61,6 +61,87 @@ static const char* TEMP_PALETTE =
     "0 '#2166AC', 0.25 '#67A9CF', 0.5 '#8BBD57', 0.75 '#E78A62', 1.0 '#B2182B'"
     ")";
 
+// Compute mean, variance, skewness, excess kurtosis from a normalised histogram
+static void hist_moments(const std::vector<double>& hist, int nbins,
+                         double xmin, double dx,
+                         double& mu, double& var, double& skew, double& kurt)
+{
+    mu = 0; var = 0; skew = 0; kurt = 0;
+    for (int b = 0; b < nbins; b++) {
+        double xc = xmin + (b + 0.5) * dx;
+        mu += xc * hist[b] * dx;
+    }
+    for (int b = 0; b < nbins; b++) {
+        double xc = xmin + (b + 0.5) * dx;
+        double d = xc - mu;
+        double d2 = d * d;
+        var  += d2 * hist[b] * dx;
+        skew += d2 * d * hist[b] * dx;
+        kurt += d2 * d2 * hist[b] * dx;
+    }
+    if (var > 0) {
+        skew /= (var * sqrt(var));
+        kurt = kurt / (var * var) - 3.0;  // excess kurtosis
+    }
+}
+
+// Write a _moments.dat file and return the data for plotting
+struct MomRow { double T, mu, mu_e, var, var_e, skew, skew_e, kurt, kurt_e; };
+static std::vector<MomRow> write_moments(
+    const char* path, const char* header,
+    const std::vector<std::vector<std::vector<double>>>& hist_s,
+    int nsamples, int ntemps, int nbins,
+    double xmin, double dx,
+    const std::vector<double>& temps)
+{
+    std::vector<MomRow> rows(ntemps);
+    for (int ti = 0; ti < ntemps; ti++) {
+        double T = temps[ti];
+        // full-sample mean histogram
+        std::vector<double> mh(nbins, 0.0);
+        for (int b = 0; b < nbins; b++) {
+            for (int s = 0; s < nsamples; s++) mh[b] += hist_s[s][ti][b];
+            mh[b] /= nsamples;
+        }
+        double fmu, fvar, fskew, fkurt;
+        hist_moments(mh, nbins, xmin, dx, fmu, fvar, fskew, fkurt);
+        // jackknife
+        double jmu=0, jvar=0, jskew=0, jkurt=0;
+        for (int j = 0; j < nsamples; j++) {
+            std::vector<double> lh(nbins, 0.0);
+            for (int b = 0; b < nbins; b++) {
+                for (int s = 0; s < nsamples; s++) {
+                    if (s == j) continue;
+                    lh[b] += hist_s[s][ti][b];
+                }
+                lh[b] /= (nsamples - 1);
+            }
+            double lm, lv, ls, lk;
+            hist_moments(lh, nbins, xmin, dx, lm, lv, ls, lk);
+            jmu  += (lm - fmu)*(lm - fmu);
+            jvar += (lv - fvar)*(lv - fvar);
+            jskew+= (ls - fskew)*(ls - fskew);
+            jkurt+= (lk - fkurt)*(lk - fkurt);
+        }
+        double f = sqrt((nsamples - 1.0) / nsamples);
+        rows[ti] = {T, fmu, f*sqrt(jmu), fvar, f*sqrt(jvar),
+                       fskew, f*sqrt(jskew), fkurt, f*sqrt(jkurt)};
+    }
+    FILE* fp = fopen(path, "w");
+    if (fp) {
+        fprintf(fp, "# %s\n", header);
+        fprintf(fp, "# Columns: T  mean  mean_err  var  var_err  skew  skew_err  kurt  kurt_err\n");
+        for (int ti = 0; ti < ntemps; ti++) {
+            auto& r = rows[ti];
+            fprintf(fp, "%.8f\t%.8e\t%.8e\t%.8e\t%.8e\t%.8e\t%.8e\t%.8e\t%.8e\n",
+                    r.T, r.mu, r.mu_e, r.var, r.var_e, r.skew, r.skew_e, r.kurt, r.kurt_e);
+        }
+        fclose(fp);
+        printf("  Written %s\n", path);
+    }
+    return rows;
+}
+
 // Common plot setup for analysis figures
 static void setup_analysis_plot(sciplot::Plot2D& plot) {
     plot.fontName("Helvetica");
@@ -118,6 +199,153 @@ static std::vector<double> read_frequencies(const char* datadir, int N) {
             omega[k] = (double)k;
     }
     return omega;
+}
+
+// ================================================================
+// Glass observables: chi, Binder g4, non-self-averaging A
+// Computed from per-sample overlap histograms (P(q), P(C), etc.)
+// ================================================================
+struct GlassObs { double T, chi, chi_e, g4, g4_e, A, A_e; };
+
+static std::vector<GlassObs> compute_glass_observables(
+    const char* tag,
+    const std::vector<std::vector<std::vector<double>>>& hist_s,
+    int nsamples, int ntemps, int nbins, int N,
+    double xmin, double dx,
+    const std::vector<double>& temps,
+    const char* outdir)
+{
+    std::vector<GlassObs> rows(ntemps);
+
+    // Per-sample raw moments: x2_s[s][ti], x4_s[s][ti]
+    std::vector<std::vector<double>> x2_s(nsamples, std::vector<double>(ntemps));
+    std::vector<std::vector<double>> x4_s(nsamples, std::vector<double>(ntemps));
+
+    for (int s = 0; s < nsamples; s++)
+        for (int ti = 0; ti < ntemps; ti++) {
+            double m2 = 0, m4 = 0;
+            for (int b = 0; b < nbins; b++) {
+                double xc = xmin + (b + 0.5) * dx;
+                double xc2 = xc * xc;
+                m2 += xc2 * hist_s[s][ti][b] * dx;
+                m4 += xc2 * xc2 * hist_s[s][ti][b] * dx;
+            }
+            x2_s[s][ti] = m2;
+            x4_s[s][ti] = m4;
+        }
+
+    for (int ti = 0; ti < ntemps; ti++) {
+        double x2f = 0, x4f = 0;
+        for (int s = 0; s < nsamples; s++) { x2f += x2_s[s][ti]; x4f += x4_s[s][ti]; }
+        x2f /= nsamples;  x4f /= nsamples;
+
+        double chi = N * x2f;
+        double g4  = (x2f > 0) ? 0.5 * (3.0 - x4f / (x2f * x2f)) : 0;
+        double x2v = 0;
+        for (int s = 0; s < nsamples; s++)
+            x2v += (x2_s[s][ti] - x2f) * (x2_s[s][ti] - x2f);
+        x2v /= nsamples;
+        double A = (x2f > 0) ? x2v / (x2f * x2f) : 0;
+
+        double jc = 0, jg = 0, jA = 0;
+        for (int j = 0; j < nsamples; j++) {
+            double lx2 = 0, lx4 = 0;
+            for (int s = 0; s < nsamples; s++) {
+                if (s == j) continue;
+                lx2 += x2_s[s][ti]; lx4 += x4_s[s][ti];
+            }
+            lx2 /= (nsamples - 1); lx4 /= (nsamples - 1);
+            double lchi = N * lx2;
+            double lg4  = (lx2 > 0) ? 0.5 * (3.0 - lx4 / (lx2 * lx2)) : 0;
+            jc += (lchi - chi) * (lchi - chi);
+            jg += (lg4  - g4)  * (lg4  - g4);
+            double lv = 0;
+            for (int s = 0; s < nsamples; s++) {
+                if (s == j) continue;
+                lv += (x2_s[s][ti] - lx2) * (x2_s[s][ti] - lx2);
+            }
+            lv /= (nsamples - 1);
+            double lA = (lx2 > 0) ? lv / (lx2 * lx2) : 0;
+            jA += (lA - A) * (lA - A);
+        }
+        double f = sqrt((nsamples - 1.0) / nsamples);
+        rows[ti] = {temps[ti], chi, f*sqrt(jc), g4, f*sqrt(jg), A, f*sqrt(jA)};
+    }
+
+    // Write glass_observables file
+    char gf[512];
+    snprintf(gf, sizeof(gf), "%s/%s_glass_observables.dat", outdir, tag);
+    FILE* fg = fopen(gf, "w");
+    if (fg) {
+        fprintf(fg, "# Glass observables from %s overlap\n", tag);
+        fprintf(fg, "# chi = N*<x^2>,  g4 = 0.5*(3-<x^4>/<x^2>^2),  A = Var_J[<x^2>]/<x^2>^2\n");
+        fprintf(fg, "# Columns: T  chi  chi_err  g4  g4_err  A  A_err\n");
+        for (auto& r : rows)
+            fprintf(fg, "%.8f\t%.8e\t%.8e\t%.8e\t%.8e\t%.8e\t%.8e\n",
+                    r.T, r.chi, r.chi_e, r.g4, r.g4_e, r.A, r.A_e);
+        fclose(fg);
+        printf("  Written %s\n", gf);
+    }
+
+    // Write per-sample <x^2>
+    char sf[512];
+    snprintf(sf, sizeof(sf), "%s/%s_sample_x2.dat", outdir, tag);
+    FILE* fs = fopen(sf, "w");
+    if (fs) {
+        fprintf(fs, "# Per-sample <x^2> for %s\n", tag);
+        fprintf(fs, "# Columns: T  sample_0  sample_1  ...  sample_{n-1}\n");
+        for (int ti = 0; ti < ntemps; ti++) {
+            fprintf(fs, "%.8f", temps[ti]);
+            for (int s = 0; s < nsamples; s++)
+                fprintf(fs, "\t%.8e", x2_s[s][ti]);
+            fprintf(fs, "\n");
+        }
+        fclose(fs);
+        printf("  Written %s\n", sf);
+    }
+
+    return rows;
+}
+
+// ================================================================
+// Quartet helpers for link overlap
+// ================================================================
+struct AnalysisQuartet { int i, j, k, l, ch; };
+
+static std::vector<AnalysisQuartet> read_quartets(const char* datadir) {
+    std::vector<AnalysisQuartet> quarts;
+    char qfile[512];
+    snprintf(qfile, sizeof(qfile), "%s/quartets.txt", datadir);
+    FILE* f = fopen(qfile, "r");
+    if (!f) return quarts;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        int idx, qi, qj, qk, ql, qch;
+        double g;
+        if (sscanf(line, "%d %d %d %d %d %d %lf", &idx, &qi, &qj, &qk, &ql, &qch, &g) == 7)
+            quarts.push_back({qi, qj, qk, ql, qch});
+    }
+    fclose(f);
+    return quarts;
+}
+
+// Re[product] for a sparse quartet with given conjugation channel
+// data layout: re0 im0 re1 im1 ...
+static double quartet_term(const double* data, int si, int sj, int sk, int sl, int ch) {
+    double ri = data[2*si], xi = data[2*si+1];
+    double rj = data[2*sj], xj = data[2*sj+1];
+    double rk = data[2*sk], xk = data[2*sk+1];
+    double rl = data[2*sl], xl = data[2*sl+1];
+    // ch=0: a_i * a_j * conj(a_k) * conj(a_l)
+    // ch=1: a_i * conj(a_j) * conj(a_k) * a_l
+    // ch=2: a_i * conj(a_j) * a_k * conj(a_l)
+    if (ch == 0)      { xk = -xk; xl = -xl; }
+    else if (ch == 1) { xj = -xj; xk = -xk; }
+    else              { xj = -xj; xl = -xl; }
+    double p01r = ri*rj - xi*xj, p01i = ri*xj + xi*rj;
+    double p23r = rk*rl - xk*xl, p23i = rk*xl + xk*rl;
+    return p01r * p23r - p01i * p23i;
 }
 
 
@@ -570,6 +798,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     int ntemps = (int)all_data[ref].size();
+    std::vector<double> temps(ntemps);
+    for (int ti = 0; ti < ntemps; ti++) temps[ti] = all_data[ref][ti].T;
 
     // ================================================================
     // Per-replica output files
@@ -1220,6 +1450,18 @@ int main(int argc, char** argv) {
             fclose(fol);
             printf("  Written %s\n", olapfile);
         }
+
+        // Moments of P(q)
+        {
+            char mf[512]; snprintf(mf, sizeof(mf), "%s/parisi_moments.dat", outdir);
+            write_moments(mf, "Moments of P(q)",
+                          hist_s, nsamples, ntemps, nbins, -1.0, 2.0/nbins,
+                          temps);
+        }
+
+        // Glass observables from P(q): chi_SG, g4 Binder, A non-self-averaging
+        compute_glass_observables("parisi", hist_s, nsamples, ntemps, nbins, N,
+                                  -1.0, 2.0/nbins, temps, outdir);
     }
 
     // ================================================================
@@ -1390,6 +1632,602 @@ int main(int argc, char** argv) {
             fclose(fif);
             printf("  Written %s\n", ifofile);
         }
+
+        // Moments of P(C) [IFO]
+        {
+            char mf[512]; snprintf(mf, sizeof(mf), "%s/ifo_moments.dat", outdir);
+            write_moments(mf, "Moments of P(C) [IFO]",
+                          ifo_hist_s, nsamples, ntemps, nbins, -1.0, 2.0/nbins,
+                          temps);
+        }
+
+        // Glass observables from P(C) [IFO]: chi_IFO, g4, A
+        compute_glass_observables("ifo", ifo_hist_s, nsamples, ntemps, nbins, N,
+                                  -1.0, 2.0/nbins, temps, outdir);
+    }
+
+    // ================================================================
+    // Experimental IFO (exp_ifo): overlap of time-averaged spectra
+    // delta_k^r = <I_k>_r - <<I_k>>,  <<I_k>> = (1/R) sum_r <I_k>_r
+    // C^{ab} = sum_k d_k^a d_k^b / sqrt(sum_k (d_k^a)^2 * sum_k (d_k^b)^2)
+    // One C per pair of replicas (no sweep index).
+    // ================================================================
+    if (nrep > 1) {
+        printf("\n── Exp-IFO overlap (nrep=%d, nbins=%d, threads=%d) ──\n",
+               nrep, nbins, nthreads);
+
+        double cmin = -1.0, cmax = 1.0;
+        double dc = (cmax - cmin) / nbins;
+
+        std::vector<std::vector<std::vector<double>>> exp_ifo_hist_s(nsamples);
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+
+            exp_ifo_hist_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+
+                    int tidx = all_data[ref][ti].tidx;
+
+                    // Find common iterations
+                    std::vector<std::vector<int>> rep_iters(nrep);
+                    for (int r = 0; r < nrep; r++)
+                        rep_iters[r] = cstore.get_iters(tidx, r);
+
+                    std::vector<int> common_iters = rep_iters[0];
+                    for (int r = 1; r < nrep; r++) {
+                        std::vector<int> tmp;
+                        std::set_intersection(common_iters.begin(), common_iters.end(),
+                                              rep_iters[r].begin(), rep_iters[r].end(),
+                                              std::back_inserter(tmp));
+                        common_iters = tmp;
+                    }
+                    int nsweeps_eq = (int)common_iters.size();
+                    if (nsweeps_eq < 1) continue;
+
+                    // Read configs and compute I_k
+                    std::vector<std::vector<std::vector<double>>> Ik(nrep);
+                    bool all_ok = true;
+                    for (int r = 0; r < nrep && all_ok; r++) {
+                        Ik[r].resize(nsweeps_eq);
+                        for (int ci = 0; ci < nsweeps_eq; ci++) {
+                            int iter = common_iters[ci];
+                            auto* ep = cstore.find_entry(tidx, r, iter);
+                            if (!ep) { all_ok = false; break; }
+                            Ik[r][ci].resize(N);
+                            for (int k = 0; k < N; k++)
+                                Ik[r][ci][k] = ep->data[2*k]*ep->data[2*k]
+                                             + ep->data[2*k+1]*ep->data[2*k+1];
+                        }
+                    }
+                    if (!all_ok) continue;
+
+                    // <I_k>_r = time average for each replica
+                    std::vector<std::vector<double>> meanI(nrep, std::vector<double>(N, 0.0));
+                    for (int r = 0; r < nrep; r++) {
+                        for (int ci = 0; ci < nsweeps_eq; ci++)
+                            for (int k = 0; k < N; k++)
+                                meanI[r][k] += Ik[r][ci][k];
+                        for (int k = 0; k < N; k++)
+                            meanI[r][k] /= nsweeps_eq;
+                    }
+
+                    // <<I_k>> = replica average of <I_k>_r
+                    std::vector<double> grandMeanI(N, 0.0);
+                    for (int r = 0; r < nrep; r++)
+                        for (int k = 0; k < N; k++)
+                            grandMeanI[k] += meanI[r][k];
+                    for (int k = 0; k < N; k++)
+                        grandMeanI[k] /= nrep;
+
+                    // delta_k^r = <I_k>_r - <<I_k>>
+                    std::vector<std::vector<double>> delta(nrep, std::vector<double>(N));
+                    std::vector<double> norm2(nrep, 0.0);
+                    for (int r = 0; r < nrep; r++) {
+                        for (int k = 0; k < N; k++) {
+                            delta[r][k] = meanI[r][k] - grandMeanI[k];
+                            norm2[r] += delta[r][k] * delta[r][k];
+                        }
+                    }
+
+                    // C^{ab} for all pairs
+                    std::vector<double> local_hist(nbins, 0.0);
+                    long long n_overlaps = 0;
+                    for (int a = 0; a < nrep; a++) {
+                        for (int b = a + 1; b < nrep; b++) {
+                            double den = sqrt(norm2[a] * norm2[b]);
+                            if (den <= 0) continue;
+                            double num = 0.0;
+                            for (int k = 0; k < N; k++)
+                                num += delta[a][k] * delta[b][k];
+                            double C = num / den;
+
+                            int bin = (int)((C - cmin) / dc);
+                            if (bin < 0) bin = 0;
+                            if (bin >= nbins) bin = nbins - 1;
+                            local_hist[bin] += 1.0;
+                            n_overlaps++;
+                        }
+                    }
+
+                    if (n_overlaps > 0) {
+                        for (int b = 0; b < nbins; b++)
+                            local_hist[b] /= (n_overlaps * dc);
+                    }
+                    exp_ifo_hist_s[s][ti] = std::move(local_hist);
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++)
+                threads.emplace_back(worker, t);
+            for (auto& th : threads)
+                th.join();
+
+            printf("  Sample S%d: exp-IFO computed\n", labels[s]);
+        }
+
+        // Write exp_ifo_overlap.dat
+        char expfile[512];
+        snprintf(expfile, sizeof(expfile), "%s/exp_ifo_overlap.dat", outdir);
+        FILE* fex = fopen(expfile, "w");
+        if (fex) {
+            fprintf(fex, "# Experimental IFO distribution P(C)\n");
+            fprintf(fex, "# N=%d NT=%d nrep=%d nbins=%d nsamples=%d\n",
+                    N, NT, nrep, nbins, nsamples);
+            fprintf(fex, "# delta_k^r = <I_k>_r - <<I_k>>,  <<I_k>> = (1/R) sum_r <I_k>_r\n");
+            fprintf(fex, "# C^{ab} = sum_k d_k^a d_k^b / sqrt(sum_k (d_k^a)^2 * sum_k (d_k^b)^2)\n");
+            fprintf(fex, "# Columns: C_center  P(C)  Error_jk  Temperature\n");
+            fprintf(fex, "# NT blocks separated by blank lines\n");
+
+            for (int ti = 0; ti < ntemps; ti++) {
+                double T = all_data[ref][ti].T;
+                fprintf(fex, "\n");
+
+                for (int b = 0; b < nbins; b++) {
+                    double cc = cmin + (b + 0.5) * dc;
+
+                    double fP = 0;
+                    for (int s = 0; s < nsamples; s++)
+                        fP += exp_ifo_hist_s[s][ti][b];
+                    fP /= nsamples;
+
+                    double jP = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double lP = 0;
+                        for (int s = 0; s < nsamples; s++) {
+                            if (s == j) continue;
+                            lP += exp_ifo_hist_s[s][ti][b];
+                        }
+                        lP /= (nsamples - 1);
+                        jP += (lP - fP) * (lP - fP);
+                    }
+                    jP = sqrt((nsamples - 1.0) / nsamples * jP);
+
+                    fprintf(fex, "%.12f\t%.8e\t%.8e\t%.8f\n", cc, fP, jP, T);
+                }
+            }
+            fclose(fex);
+            printf("  Written %s\n", expfile);
+        }
+
+        // Moments of P(C) [exp-IFO]
+        {
+            char mf[512]; snprintf(mf, sizeof(mf), "%s/exp_ifo_moments.dat", outdir);
+            write_moments(mf, "Moments of P(C) [exp-IFO]",
+                          exp_ifo_hist_s, nsamples, ntemps, nbins, -1.0, 2.0/nbins,
+                          temps);
+        }
+
+        // Glass observables from P(C) [exp-IFO]: chi, g4, A
+        compute_glass_observables("exp_ifo", exp_ifo_hist_s, nsamples, ntemps, nbins, N,
+                                  -1.0, 2.0/nbins, temps, outdir);
+    }
+
+    // ================================================================
+    // P(|a|^2) marginal, IPR Y2/Y4, Phase overlap, Link overlap, Scatter
+    // ================================================================
+    if (nrep > 1) {
+        printf("\n── P(|a|²), IPR, phase/link overlaps ───────────────\n");
+
+        // Histogram settings
+        int    nbins_a2 = 100;
+        double a2_max   = 10.0;
+        double da2      = a2_max / nbins_a2;
+        double dqphi    = 2.0 / nbins;   // phase overlap bins on [-1,1]
+        double dqlink   = 2.0 / nbins;   // link  overlap bins on [-1,1]
+
+        // Per-sample storage
+        std::vector<std::vector<std::vector<double>>> marginal_s(nsamples);
+        std::vector<std::vector<double>> ipr2_s(nsamples, std::vector<double>(ntemps, 0.0));
+        std::vector<std::vector<double>> ipr4_s(nsamples, std::vector<double>(ntemps, 0.0));
+        std::vector<std::vector<std::vector<double>>> phase_s(nsamples);
+        std::vector<std::vector<std::vector<double>>> link_s(nsamples);
+
+        struct ScatterPt { double q, ql; };
+        std::vector<std::vector<std::vector<ScatterPt>>> scat_s(nsamples);
+        bool has_quartets_global = false;
+
+        for (int s = 0; s < nsamples; s++) {
+            char sdir[256];
+            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
+                     prefix, N, NT, nrep, labels[s]);
+            ConfigStore cstore;
+            cstore.load(sdir, N, NT, nrep);
+
+            auto quarts = read_quartets(sdir);
+            int M = (int)quarts.size();
+            bool hq = (M > 0);
+            if (hq) has_quartets_global = true;
+
+            marginal_s[s].resize(ntemps, std::vector<double>(nbins_a2, 0.0));
+            phase_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
+            link_s[s].resize(ntemps, std::vector<double>(nbins, 0.0));
+            scat_s[s].resize(ntemps);
+
+            std::atomic<int> ti_next(0);
+            auto worker = [&](int /*id*/) {
+                while (true) {
+                    int ti = ti_next.fetch_add(1);
+                    if (ti >= ntemps) break;
+
+                    int tidx = all_data[ref][ti].tidx;
+
+                    // Common iterations across replicas
+                    std::vector<std::vector<int>> rep_iters(nrep);
+                    for (int r = 0; r < nrep; r++)
+                        rep_iters[r] = cstore.get_iters(tidx, r);
+                    std::vector<int> common_iters = rep_iters[0];
+                    for (int r = 1; r < nrep; r++) {
+                        std::vector<int> tmp;
+                        std::set_intersection(common_iters.begin(), common_iters.end(),
+                                              rep_iters[r].begin(), rep_iters[r].end(),
+                                              std::back_inserter(tmp));
+                        common_iters = tmp;
+                    }
+                    if (common_iters.empty()) continue;
+
+                    // Local accumulators
+                    std::vector<double> loc_marg(nbins_a2, 0.0);
+                    double loc_y2 = 0, loc_y4 = 0;
+                    long long n_ipr = 0;
+                    std::vector<double> loc_phase(nbins, 0.0);
+                    long long n_ph = 0;
+                    std::vector<double> loc_link(nbins, 0.0);
+                    long long n_lk = 0;
+                    std::vector<ScatterPt> loc_scat;
+
+                    // Spin buffers & raw pointers
+                    std::vector<std::vector<double>> sre(nrep, std::vector<double>(N));
+                    std::vector<std::vector<double>> sim(nrep, std::vector<double>(N));
+                    std::vector<const double*> raw(nrep, nullptr);
+
+                    for (int ci = 0; ci < (int)common_iters.size(); ci++) {
+                        int iter = common_iters[ci];
+                        bool ok = true;
+                        for (int r = 0; r < nrep; r++) {
+                            auto* ep = cstore.find_entry(tidx, r, iter);
+                            if (!ep) { ok = false; break; }
+                            raw[r] = ep->data.data();
+                            for (int k = 0; k < N; k++) {
+                                sre[r][k] = ep->data[2*k];
+                                sim[r][k] = ep->data[2*k+1];
+                            }
+                        }
+                        if (!ok) continue;
+
+                        // --- P(|a|^2) and IPR for each replica config ---
+                        for (int r = 0; r < nrep; r++) {
+                            double sI = 0, sI2 = 0, sI4 = 0;
+                            for (int k = 0; k < N; k++) {
+                                double Ik = sre[r][k]*sre[r][k] + sim[r][k]*sim[r][k];
+                                sI += Ik; sI2 += Ik*Ik; sI4 += Ik*Ik*Ik*Ik;
+                                int bin = (int)(Ik / da2);
+                                if (bin >= 0 && bin < nbins_a2)
+                                    loc_marg[bin]++;
+                            }
+                            double d2 = sI * sI;
+                            if (d2 > 0) {
+                                loc_y2 += sI2 / d2;
+                                loc_y4 += sI4 / (d2 * d2);
+                                n_ipr++;
+                            }
+                        }
+
+                        // --- Overlap pairs: phase, link, scatter ---
+                        for (int a = 0; a < nrep; a++) {
+                            for (int b = a + 1; b < nrep; b++) {
+                                // Phase overlap: q_phi = (1/N_eff) sum cos(theta_a - theta_b)
+                                double ph = 0; int npm = 0;
+                                for (int k = 0; k < N; k++) {
+                                    double ra2 = sre[a][k]*sre[a][k]+sim[a][k]*sim[a][k];
+                                    double rb2 = sre[b][k]*sre[b][k]+sim[b][k]*sim[b][k];
+                                    if (ra2 > 1e-24 && rb2 > 1e-24) {
+                                        ph += (sre[a][k]*sre[b][k]+sim[a][k]*sim[b][k])
+                                              / sqrt(ra2 * rb2);
+                                        npm++;
+                                    }
+                                }
+                                double qph = (npm > 0) ? ph / npm : 0;
+                                {
+                                    int bin = (int)((qph + 1.0) / dqphi);
+                                    if (bin < 0) bin = 0;
+                                    if (bin >= nbins) bin = nbins - 1;
+                                    loc_phase[bin]++;
+                                    n_ph++;
+                                }
+
+                                // Parisi overlap (needed for scatter)
+                                double rs = 0;
+                                for (int k = 0; k < N; k++)
+                                    rs += sre[a][k]*sre[b][k] + sim[a][k]*sim[b][k];
+                                double qp = rs / N;
+
+                                // Link overlap
+                                if (hq) {
+                                    double ls = 0;
+                                    for (int qi = 0; qi < M; qi++) {
+                                        auto& qq = quarts[qi];
+                                        double ta = quartet_term(raw[a], qq.i, qq.j, qq.k, qq.l, qq.ch);
+                                        double tb = quartet_term(raw[b], qq.i, qq.j, qq.k, qq.l, qq.ch);
+                                        ls += ta * tb;
+                                    }
+                                    double ql = ls / M;
+                                    {
+                                        int bin = (int)((ql + 1.0) / dqlink);
+                                        if (bin < 0) bin = 0;
+                                        if (bin >= nbins) bin = nbins - 1;
+                                        loc_link[bin]++;
+                                        n_lk++;
+                                    }
+                                    loc_scat.push_back({qp, ql});
+                                }
+                            }
+                        }
+                    }
+
+                    // Normalize histograms to probability densities
+                    long long nmodes = n_ipr * N;
+                    if (nmodes > 0)
+                        for (auto& v : loc_marg) v /= (nmodes * da2);
+                    if (n_ipr > 0) { loc_y2 /= n_ipr; loc_y4 /= n_ipr; }
+                    if (n_ph > 0)
+                        for (auto& v : loc_phase) v /= (n_ph * dqphi);
+                    if (n_lk > 0)
+                        for (auto& v : loc_link) v /= (n_lk * dqlink);
+
+                    marginal_s[s][ti] = std::move(loc_marg);
+                    ipr2_s[s][ti] = loc_y2;
+                    ipr4_s[s][ti] = loc_y4;
+                    phase_s[s][ti] = std::move(loc_phase);
+                    link_s[s][ti] = std::move(loc_link);
+                    scat_s[s][ti] = std::move(loc_scat);
+                }
+            };
+
+            int nt = std::min(nthreads, ntemps);
+            std::vector<std::thread> threads;
+            for (int t = 0; t < nt; t++) threads.emplace_back(worker, t);
+            for (auto& th : threads) th.join();
+
+            printf("  Sample S%d done\n", labels[s]);
+        }
+
+        // ---- Write P(|a|^2) marginal distribution ----
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/marginal_a2.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Marginal distribution P(|a_k|^2 = I_k)\n");
+                fprintf(f, "# Columns: I_center  P(I)  Error_jk  Temperature\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    double T = temps[ti];
+                    fprintf(f, "\n");
+                    for (int b = 0; b < nbins_a2; b++) {
+                        double Ic = (b + 0.5) * da2;
+                        double fP = 0;
+                        for (int ss = 0; ss < nsamples; ss++) fP += marginal_s[ss][ti][b];
+                        fP /= nsamples;
+                        double jP = 0;
+                        for (int j = 0; j < nsamples; j++) {
+                            double lP = 0;
+                            for (int ss = 0; ss < nsamples; ss++) {
+                                if (ss == j) continue;
+                                lP += marginal_s[ss][ti][b];
+                            }
+                            lP /= (nsamples - 1);
+                            jP += (lP - fP) * (lP - fP);
+                        }
+                        jP = sqrt((nsamples - 1.0) / nsamples * jP);
+                        fprintf(f, "%.12f\t%.8e\t%.8e\t%.8f\n", Ic, fP, jP, T);
+                    }
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+
+        // ---- Write IPR Y2, Y4 ----
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/ipr.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Inverse Participation Ratios\n");
+                fprintf(f, "# Y2 = sum I_k^2 / (sum I_k)^2,  Y4 = sum I_k^4 / (sum I_k)^4\n");
+                fprintf(f, "# 1/Y2 = effective number of participating modes\n");
+                fprintf(f, "# Columns: T  Y2  Y2_err  Y4  Y4_err\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    double T = temps[ti];
+                    double y2f = 0, y4f = 0;
+                    for (int ss = 0; ss < nsamples; ss++) {
+                        y2f += ipr2_s[ss][ti]; y4f += ipr4_s[ss][ti];
+                    }
+                    y2f /= nsamples; y4f /= nsamples;
+                    double jy2 = 0, jy4 = 0;
+                    for (int j = 0; j < nsamples; j++) {
+                        double ly2 = 0, ly4 = 0;
+                        for (int ss = 0; ss < nsamples; ss++) {
+                            if (ss == j) continue;
+                            ly2 += ipr2_s[ss][ti]; ly4 += ipr4_s[ss][ti];
+                        }
+                        ly2 /= (nsamples - 1); ly4 /= (nsamples - 1);
+                        jy2 += (ly2 - y2f) * (ly2 - y2f);
+                        jy4 += (ly4 - y4f) * (ly4 - y4f);
+                    }
+                    double ff = sqrt((nsamples - 1.0) / nsamples);
+                    fprintf(f, "%.8f\t%.8e\t%.8e\t%.8e\t%.8e\n",
+                            T, y2f, ff*sqrt(jy2), y4f, ff*sqrt(jy4));
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+
+        // ---- Write per-sample IPR for sample-by-sample analysis ----
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/ipr_sample.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Per-sample Y2 values\n");
+                fprintf(f, "# Columns: T  sample_0  sample_1  ... sample_{n-1}\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    fprintf(f, "%.8f", temps[ti]);
+                    for (int ss = 0; ss < nsamples; ss++)
+                        fprintf(f, "\t%.8e", ipr2_s[ss][ti]);
+                    fprintf(f, "\n");
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+
+        // ---- Write phase overlap P(q_phi) ----
+        {
+            char fname[512];
+            snprintf(fname, sizeof(fname), "%s/phase_overlap.dat", outdir);
+            FILE* f = fopen(fname, "w");
+            if (f) {
+                fprintf(f, "# Phase overlap distribution P(q_phi)\n");
+                fprintf(f, "# q_phi = (1/N_eff) sum_k cos(theta_k^a - theta_k^b)\n");
+                fprintf(f, "# Columns: q_phi_center  P(q_phi)  Error_jk  Temperature\n");
+                for (int ti = 0; ti < ntemps; ti++) {
+                    double T = temps[ti];
+                    fprintf(f, "\n");
+                    for (int b = 0; b < nbins; b++) {
+                        double qc = -1.0 + (b + 0.5) * dqphi;
+                        double fP = 0;
+                        for (int ss = 0; ss < nsamples; ss++) fP += phase_s[ss][ti][b];
+                        fP /= nsamples;
+                        double jP = 0;
+                        for (int j = 0; j < nsamples; j++) {
+                            double lP = 0;
+                            for (int ss = 0; ss < nsamples; ss++) {
+                                if (ss == j) continue;
+                                lP += phase_s[ss][ti][b];
+                            }
+                            lP /= (nsamples - 1);
+                            jP += (lP - fP) * (lP - fP);
+                        }
+                        jP = sqrt((nsamples - 1.0) / nsamples * jP);
+                        fprintf(f, "%.12f\t%.8e\t%.8e\t%.8f\n", qc, fP, jP, T);
+                    }
+                }
+                fclose(f);
+                printf("  Written %s\n", fname);
+            }
+        }
+
+        // Phase overlap moments & glass observables
+        {
+            char mf[512];
+            snprintf(mf, sizeof(mf), "%s/phase_moments.dat", outdir);
+            write_moments(mf, "Moments of P(q_phi)",
+                          phase_s, nsamples, ntemps, nbins, -1.0, dqphi, temps);
+        }
+        compute_glass_observables("phase", phase_s, nsamples, ntemps, nbins, N,
+                                  -1.0, dqphi, temps, outdir);
+
+        // ---- Link overlap (only if quartets available) ----
+        if (has_quartets_global) {
+            // Write link overlap P(q_link)
+            {
+                char fname[512];
+                snprintf(fname, sizeof(fname), "%s/link_overlap.dat", outdir);
+                FILE* f = fopen(fname, "w");
+                if (f) {
+                    fprintf(f, "# Link overlap distribution P(q_link)\n");
+                    fprintf(f, "# q_link = (1/M) sum_q t_q(a)*t_q(b),  t_q = Re[prod with channel]\n");
+                    fprintf(f, "# Columns: q_link_center  P(q_link)  Error_jk  Temperature\n");
+                    for (int ti = 0; ti < ntemps; ti++) {
+                        double T = temps[ti];
+                        fprintf(f, "\n");
+                        for (int b = 0; b < nbins; b++) {
+                            double qc = -1.0 + (b + 0.5) * dqlink;
+                            double fP = 0;
+                            for (int ss = 0; ss < nsamples; ss++) fP += link_s[ss][ti][b];
+                            fP /= nsamples;
+                            double jP = 0;
+                            for (int j = 0; j < nsamples; j++) {
+                                double lP = 0;
+                                for (int ss = 0; ss < nsamples; ss++) {
+                                    if (ss == j) continue;
+                                    lP += link_s[ss][ti][b];
+                                }
+                                lP /= (nsamples - 1);
+                                jP += (lP - fP) * (lP - fP);
+                            }
+                            jP = sqrt((nsamples - 1.0) / nsamples * jP);
+                            fprintf(f, "%.12f\t%.8e\t%.8e\t%.8f\n", qc, fP, jP, T);
+                        }
+                    }
+                    fclose(f);
+                    printf("  Written %s\n", fname);
+                }
+            }
+
+            // Link moments & glass observables
+            {
+                char mf[512];
+                snprintf(mf, sizeof(mf), "%s/link_moments.dat", outdir);
+                write_moments(mf, "Moments of P(q_link)",
+                              link_s, nsamples, ntemps, nbins, -1.0, dqlink, temps);
+            }
+            compute_glass_observables("link", link_s, nsamples, ntemps, nbins, N,
+                                      -1.0, dqlink, temps, outdir);
+
+            // Write scatter data: (q_parisi, q_link) pairs
+            {
+                char fname[512];
+                snprintf(fname, sizeof(fname), "%s/scatter_q_qlink.dat", outdir);
+                FILE* f = fopen(fname, "w");
+                if (f) {
+                    fprintf(f, "# Scatter: Parisi overlap q vs Link overlap q_link\n");
+                    fprintf(f, "# Columns: q_parisi  q_link  Temperature\n");
+                    for (int ti = 0; ti < ntemps; ti++) {
+                        double T = temps[ti];
+                        fprintf(f, "\n");
+                        for (int ss = 0; ss < nsamples; ss++)
+                            for (auto& pt : scat_s[ss][ti])
+                                fprintf(f, "%.8e\t%.8e\t%.8f\n", pt.q, pt.ql, T);
+                    }
+                    fclose(f);
+                    printf("  Written %s\n", fname);
+                }
+            }
+        }
     }
 
     // ================================================================
@@ -1491,13 +2329,13 @@ int main(int argc, char** argv) {
                         vCv[i]  = data[i].Cv;  vCvlo[i] = data[i].Cv - data[i].Cverr; vCvhi[i] = data[i].Cv + data[i].Cverr;
                     }
 
-                    // Energy plot
-                    {
+                    // Energy plot (linear + log10)
+                    for (int lm = 0; lm < 2; lm++) {
                         Plot2D plot;
                         setup_analysis_plot(plot);
                         plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("{/Helvetica-Oblique E} / {/Helvetica-Oblique N}");
-                        // if (log_temp) plot.gnuplot("set logscale x");
+                        if (lm) plot.gnuplot("set logscale x 10");
                         plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vElo, vEhi)
                             .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
@@ -1507,17 +2345,17 @@ int main(int argc, char** argv) {
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
                         canvas.size(900, 600);
-                        char pf[512]; snprintf(pf, sizeof(pf), "%s/energy.png", plotdir);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/energy%s.png", plotdir, lm ? "_log" : "");
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
                     }
-                    // MC Acceptance plot
-                    {
+                    // MC Acceptance plot (linear + log10)
+                    for (int lm = 0; lm < 2; lm++) {
                         Plot2D plot;
                         setup_analysis_plot(plot);
                         plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("MC acceptance");
-                        // if (log_temp) plot.gnuplot("set logscale x");
+                        if (lm) plot.gnuplot("set logscale x 10");
                         plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vAlo, vAhi)
                             .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
@@ -1527,17 +2365,17 @@ int main(int argc, char** argv) {
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
                         canvas.size(900, 600);
-                        char pf[512]; snprintf(pf, sizeof(pf), "%s/acceptance.png", plotdir);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/acceptance%s.png", plotdir, lm ? "_log" : "");
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
                     }
-                    // Specific heat plot
-                    {
+                    // Specific heat plot (linear + log10)
+                    for (int lm = 0; lm < 2; lm++) {
                         Plot2D plot;
                         setup_analysis_plot(plot);
                         plot.xlabel("{/Helvetica-Oblique T}");
                         plot.ylabel("{/Helvetica-Oblique C}_{/Helvetica-Oblique v}");
-                        // if (log_temp) plot.gnuplot("set logscale x");
+                        if (lm) plot.gnuplot("set logscale x 10");
                         plot.legend().atTopRight().fontSize(12);
                         plot.drawCurvesFilled(vT, vCvlo, vCvhi)
                             .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
@@ -1547,7 +2385,7 @@ int main(int argc, char** argv) {
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
                         canvas.size(900, 600);
-                        char pf[512]; snprintf(pf, sizeof(pf), "%s/specific_heat.png", plotdir);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/specific_heat%s.png", plotdir, lm ? "_log" : "");
                         canvas.save(pf);
                         printf("  Written %s\n", pf);
                     }
@@ -1582,23 +2420,25 @@ int main(int argc, char** argv) {
                         vRlo[i] = data[i].rate - data[i].err;
                         vRhi[i] = data[i].rate + data[i].err;
                     }
-                    Plot2D plot;
-                    setup_analysis_plot(plot);
-                    plot.xlabel("{/Helvetica-Oblique T}");
-                    plot.ylabel("PT exchange rate");
-                    // if (log_temp) plot.gnuplot("set logscale x");
-                    plot.legend().atTopRight().fontSize(12);
-                    plot.drawCurvesFilled(vT, vRlo, vRhi)
-                        .fillColor("#8da0cb").fillIntensity(0.35).fillTransparent()
-                        .lineColor("#8da0cb").lineWidth(0).labelNone();
-                    plot.drawCurve(vT, vR)
-                        .lineColor("#542788").lineWidth(2).label("PT exchange");
-                    Figure fig = {{plot}};
-                    Canvas canvas = {{fig}};
-                    canvas.size(900, 600);
-                    char pf[512]; snprintf(pf, sizeof(pf), "%s/exchange_rates.png", plotdir);
-                    canvas.save(pf);
-                    printf("  Written %s\n", pf);
+                    for (int lm = 0; lm < 2; lm++) {
+                        Plot2D plot;
+                        setup_analysis_plot(plot);
+                        plot.xlabel("{/Helvetica-Oblique T}");
+                        plot.ylabel("PT exchange rate");
+                        if (lm) plot.gnuplot("set logscale x 10");
+                        plot.legend().atTopRight().fontSize(12);
+                        plot.drawCurvesFilled(vT, vRlo, vRhi)
+                            .fillColor("#8da0cb").fillIntensity(0.35).fillTransparent()
+                            .lineColor("#8da0cb").lineWidth(0).labelNone();
+                        plot.drawCurve(vT, vR)
+                            .lineColor("#542788").lineWidth(2).label("PT exchange");
+                        Figure fig = {{plot}};
+                        Canvas canvas = {{fig}};
+                        canvas.size(900, 600);
+                        char pf[512]; snprintf(pf, sizeof(pf), "%s/exchange_rates%s.png", plotdir, lm ? "_log" : "");
+                        canvas.save(pf);
+                        printf("  Written %s\n", pf);
+                    }
                 }
             }
         }
@@ -1724,6 +2564,7 @@ int main(int argc, char** argv) {
                 plot.legend().hide();
                 plot.gnuplot("set logscale y 10");
                 plot.gnuplot("set format y '10^{%L}'");
+                plot.gnuplot("set yrange [1e-5:*]");
 
                 int nb = (int)oblocks.size();
                 double Tmin_ov = oblocks.back()[0].T;
@@ -1751,6 +2592,36 @@ int main(int argc, char** argv) {
                 char pf[512]; snprintf(pf, sizeof(pf), "%s/parisi_overlap.png", plotdir);
                 canvas.save(pf);
                 printf("  Written %s\n", pf);
+
+                // --- Linear-scale P(q) ---
+                {
+                    Plot2D plot2;
+                    plot2.xlabel("{/Helvetica-Oblique q}");
+                    plot2.ylabel("{/Helvetica-Oblique P}({/Helvetica-Oblique q})");
+                    plot2.legend().hide();
+                    setup_colorbar_plot(plot2, Tmin_ov, Tmax_ov, log_temp);
+
+                    for (int bi = 0; bi < nb; bi++) {
+                        auto& bl = oblocks[bi];
+                        std::vector<double> vq, vpq;
+                        for (int i = 0; i < (int)bl.size(); i++) {
+                            vq.push_back(bl[i].q); vpq.push_back(bl[i].pq);
+                        }
+                        if (vq.empty()) continue;
+                        char pcol[64];
+                        snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
+                        plot2.drawCurve(vq, vpq)
+                            .lineColor(pcol)
+                            .lineWidth(2)
+                            .label("");
+                    }
+                    Figure fig2 = {{plot2}};
+                    Canvas canvas2 = {{fig2}};
+                    canvas2.size(1000, 700);
+                    char pf2[512]; snprintf(pf2, sizeof(pf2), "%s/parisi_overlap_linear.png", plotdir);
+                    canvas2.save(pf2);
+                    printf("  Written %s\n", pf2);
+                }
             }
         }
 
@@ -1789,6 +2660,7 @@ int main(int argc, char** argv) {
                 plot.legend().hide();
                 plot.gnuplot("set logscale y 10");
                 plot.gnuplot("set format y '10^{%L}'");
+                plot.gnuplot("set yrange [1e-5:*]");
 
                 int nb = (int)iblocks.size();
                 double Tmin_if = iblocks.back()[0].T;
@@ -1816,6 +2688,482 @@ int main(int argc, char** argv) {
                 char ipf[512]; snprintf(ipf, sizeof(ipf), "%s/ifo_overlap.png", plotdir);
                 canvas.save(ipf);
                 printf("  Written %s\n", ipf);
+
+                // --- Linear-scale IFO ---
+                {
+                    Plot2D plot2;
+                    plot2.xlabel("{/Helvetica-Oblique C}");
+                    plot2.ylabel("{/Helvetica-Oblique P}({/Helvetica-Oblique C})");
+                    plot2.legend().hide();
+                    setup_colorbar_plot(plot2, Tmin_if, Tmax_if, log_temp);
+
+                    for (int bi = 0; bi < nb; bi++) {
+                        auto& bl = iblocks[bi];
+                        std::vector<double> vc, vpc;
+                        for (int i = 0; i < (int)bl.size(); i++) {
+                            vc.push_back(bl[i].q); vpc.push_back(bl[i].pq);
+                        }
+                        if (vc.empty()) continue;
+                        char pcol[64];
+                        snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
+                        plot2.drawCurve(vc, vpc)
+                            .lineColor(pcol)
+                            .lineWidth(2)
+                            .label("");
+                    }
+                    Figure fig2 = {{plot2}};
+                    Canvas canvas2 = {{fig2}};
+                    canvas2.size(1000, 700);
+                    char ipf2[512]; snprintf(ipf2, sizeof(ipf2), "%s/ifo_overlap_linear.png", plotdir);
+                    canvas2.save(ipf2);
+                    printf("  Written %s\n", ipf2);
+                }
+            }
+        }
+
+        // --- Exp-IFO overlap P(C) plots (log + linear) ---
+        if (nrep > 1) {
+            char expfile[512];
+            snprintf(expfile, sizeof(expfile), "%s/exp_ifo_overlap.dat", outdir);
+
+            struct OlapRow { double q, pq, err, T; };
+            std::vector<std::vector<OlapRow>> eblocks;
+            {
+                FILE* f = fopen(expfile, "r");
+                if (f) {
+                    char line[512];
+                    std::vector<OlapRow> cur;
+                    while (fgets(line, sizeof(line), f)) {
+                        if (line[0] == '#') continue;
+                        if (line[0] == '\n') {
+                            if (!cur.empty()) eblocks.push_back(cur);
+                            cur.clear();
+                            continue;
+                        }
+                        OlapRow r;
+                        if (sscanf(line, "%lf %lf %lf %lf", &r.q, &r.pq, &r.err, &r.T) == 4)
+                            cur.push_back(r);
+                    }
+                    if (!cur.empty()) eblocks.push_back(cur);
+                    fclose(f);
+                }
+            }
+
+            if (!eblocks.empty()) {
+                int nb = (int)eblocks.size();
+                double Tmin_ei = eblocks.back()[0].T;
+                double Tmax_ei = eblocks.front()[0].T;
+
+                // Log-scale
+                {
+                    Plot2D plot;
+                    plot.xlabel("{/Helvetica-Oblique C}");
+                    plot.ylabel("{/Helvetica-Oblique P}({/Helvetica-Oblique C})");
+                    plot.legend().hide();
+                    plot.gnuplot("set logscale y 10");
+                    plot.gnuplot("set format y '10^{%L}'");
+                    plot.gnuplot("set yrange [1e-5:*]");
+                    setup_colorbar_plot(plot, Tmin_ei, Tmax_ei, log_temp);
+
+                    for (int bi = 0; bi < nb; bi++) {
+                        auto& bl = eblocks[bi];
+                        std::vector<double> vc, vpc;
+                        for (int i = 0; i < (int)bl.size(); i++) {
+                            if (bl[i].pq > 0) { vc.push_back(bl[i].q); vpc.push_back(bl[i].pq); }
+                        }
+                        if (vc.empty()) continue;
+                        char pcol[64];
+                        snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
+                        plot.drawCurve(vc, vpc)
+                            .lineColor(pcol)
+                            .lineWidth(2)
+                            .label("");
+                    }
+                    Figure fig = {{plot}};
+                    Canvas canvas = {{fig}};
+                    canvas.size(1000, 700);
+                    char pf[512]; snprintf(pf, sizeof(pf), "%s/exp_ifo_overlap.png", plotdir);
+                    canvas.save(pf);
+                    printf("  Written %s\n", pf);
+                }
+
+                // Linear-scale
+                {
+                    Plot2D plot;
+                    plot.xlabel("{/Helvetica-Oblique C}");
+                    plot.ylabel("{/Helvetica-Oblique P}({/Helvetica-Oblique C})");
+                    plot.legend().hide();
+                    setup_colorbar_plot(plot, Tmin_ei, Tmax_ei, log_temp);
+
+                    for (int bi = 0; bi < nb; bi++) {
+                        auto& bl = eblocks[bi];
+                        std::vector<double> vc, vpc;
+                        for (int i = 0; i < (int)bl.size(); i++) {
+                            vc.push_back(bl[i].q); vpc.push_back(bl[i].pq);
+                        }
+                        if (vc.empty()) continue;
+                        char pcol[64];
+                        snprintf(pcol, sizeof(pcol), "palette cb %.8f", bl[0].T);
+                        plot.drawCurve(vc, vpc)
+                            .lineColor(pcol)
+                            .lineWidth(2)
+                            .label("");
+                    }
+                    Figure fig = {{plot}};
+                    Canvas canvas = {{fig}};
+                    canvas.size(1000, 700);
+                    char pf[512]; snprintf(pf, sizeof(pf), "%s/exp_ifo_overlap_linear.png", plotdir);
+                    canvas.save(pf);
+                    printf("  Written %s\n", pf);
+                }
+            }
+        }
+
+        // --- Moments plots ---
+        {
+            const char* mom_files[3] = {
+                "parisi_moments.dat", "ifo_moments.dat", "exp_ifo_moments.dat"
+            };
+            const char* mom_pngs[3] = {
+                "parisi_moments.png", "ifo_moments.png", "exp_ifo_moments.png"
+            };
+            const char* mom_var[3] = { "q", "C", "C" };
+
+            for (int mi = 0; mi < 3; mi++) {
+                char mf[512]; snprintf(mf, sizeof(mf), "%s/%s", outdir, mom_files[mi]);
+                FILE* f = fopen(mf, "r");
+                if (!f) continue;
+
+                std::vector<double> vT, vMu, eMu, vVar, eVar, vSkew, eSkew, vKurt, eKurt;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    double T_, m_, me_, v_, ve_, s_, se_, k_, ke_;
+                    if (sscanf(line, "%lf %lf %lf %lf %lf %lf %lf %lf %lf",
+                               &T_, &m_, &me_, &v_, &ve_, &s_, &se_, &k_, &ke_) == 9) {
+                        vT.push_back(T_);  vMu.push_back(m_);  eMu.push_back(me_);
+                        vVar.push_back(v_); eVar.push_back(ve_);
+                        vSkew.push_back(s_); eSkew.push_back(se_);
+                        vKurt.push_back(k_); eKurt.push_back(ke_);
+                    }
+                }
+                fclose(f);
+                if (vT.empty()) continue;
+
+                int nd = (int)vT.size();
+                std::vector<double> muLo(nd), muHi(nd), varLo(nd), varHi(nd);
+                std::vector<double> skLo(nd), skHi(nd), kuLo(nd), kuHi(nd);
+                for (int i = 0; i < nd; i++) {
+                    muLo[i]  = vMu[i]   - eMu[i];   muHi[i]  = vMu[i]   + eMu[i];
+                    varLo[i] = vVar[i]  - eVar[i];   varHi[i] = vVar[i]  + eVar[i];
+                    skLo[i]  = vSkew[i] - eSkew[i];  skHi[i]  = vSkew[i] + eSkew[i];
+                    kuLo[i]  = vKurt[i] - eKurt[i];  kuHi[i]  = vKurt[i] + eKurt[i];
+                }
+
+                char vl[64];
+
+                Plot2D p1; setup_analysis_plot(p1);
+                p1.gnuplot("set logscale x 10");
+                p1.xlabel("{/Helvetica-Oblique T}");
+                snprintf(vl, sizeof(vl), "<{/Helvetica-Oblique %s}>", mom_var[mi]);
+                p1.ylabel(vl);
+                p1.legend().hide();
+                p1.drawCurvesFilled(vT, muLo, muHi)
+                    .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
+                    .lineColor("#4393c3").lineWidth(0).labelNone();
+                p1.drawCurve(vT, vMu).lineColor("#2166ac").lineWidth(2).label("");
+
+                Plot2D p2; setup_analysis_plot(p2);
+                p2.gnuplot("set logscale x 10");
+                p2.xlabel("{/Helvetica-Oblique T}");
+                snprintf(vl, sizeof(vl), "Var({/Helvetica-Oblique %s})", mom_var[mi]);
+                p2.ylabel(vl);
+                p2.legend().hide();
+                p2.drawCurvesFilled(vT, varLo, varHi)
+                    .fillColor("#66c2a5").fillIntensity(0.35).fillTransparent()
+                    .lineColor("#66c2a5").lineWidth(0).labelNone();
+                p2.drawCurve(vT, vVar).lineColor("#1b9e77").lineWidth(2).label("");
+
+                Plot2D p3; setup_analysis_plot(p3);
+                p3.gnuplot("set logscale x 10");
+                p3.xlabel("{/Helvetica-Oblique T}");
+                snprintf(vl, sizeof(vl), "Skew({/Helvetica-Oblique %s})", mom_var[mi]);
+                p3.ylabel(vl);
+                p3.legend().hide();
+                p3.drawCurvesFilled(vT, skLo, skHi)
+                    .fillColor("#fc8d62").fillIntensity(0.35).fillTransparent()
+                    .lineColor("#fc8d62").lineWidth(0).labelNone();
+                p3.drawCurve(vT, vSkew).lineColor("#d95f02").lineWidth(2).label("");
+
+                Plot2D p4; setup_analysis_plot(p4);
+                p4.gnuplot("set logscale x 10");
+                p4.xlabel("{/Helvetica-Oblique T}");
+                snprintf(vl, sizeof(vl), "Kurt({/Helvetica-Oblique %s})", mom_var[mi]);
+                p4.ylabel(vl);
+                p4.legend().hide();
+                p4.drawCurvesFilled(vT, kuLo, kuHi)
+                    .fillColor("#8da0cb").fillIntensity(0.35).fillTransparent()
+                    .lineColor("#8da0cb").lineWidth(0).labelNone();
+                p4.drawCurve(vT, vKurt).lineColor("#7570b3").lineWidth(2).label("");
+
+                Figure fig = {{p1, p2}, {p3, p4}};
+                Canvas canvas = {{fig}};
+                canvas.size(1200, 900);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/%s", plotdir, mom_pngs[mi]);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // ============================================================
+        // New Plots: distributions, glass observables, IPR
+        // ============================================================
+
+        // Helper lambda: generic colorbar distribution plot from file
+        auto make_dist_plot = [&](const char* datafile, const char* xl,
+                                  const char* yl, const char* pngname,
+                                  bool logy = true) {
+            struct Row { double x, p, e, T; };
+            std::vector<std::vector<Row>> blocks;
+            FILE* f = fopen(datafile, "r");
+            if (f) {
+                char line[512]; std::vector<Row> cur;
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#') continue;
+                    if (line[0] == '\n') {
+                        if (!cur.empty()) blocks.push_back(cur);
+                        cur.clear(); continue;
+                    }
+                    Row r;
+                    if (sscanf(line, "%lf %lf %lf %lf", &r.x, &r.p, &r.e, &r.T) == 4)
+                        cur.push_back(r);
+                }
+                if (!cur.empty()) blocks.push_back(cur);
+                fclose(f);
+            }
+            if (blocks.empty()) return;
+
+            Plot2D plot; plot.xlabel(xl); plot.ylabel(yl); plot.legend().hide();
+            if (logy) {
+                plot.gnuplot("set logscale y 10");
+                plot.gnuplot("set format y '10^{%L}'");
+                plot.gnuplot("set yrange [1e-5:*]");
+            }
+            double Tlo = blocks.back()[0].T, Thi = blocks.front()[0].T;
+            setup_colorbar_plot(plot, Tlo, Thi, log_temp);
+            for (auto& bl : blocks) {
+                std::vector<double> vx, vy;
+                for (auto& r : bl) {
+                    if (logy && r.p <= 0) continue;
+                    vx.push_back(r.x); vy.push_back(r.p);
+                }
+                if (vx.empty()) continue;
+                char pc[64]; snprintf(pc, sizeof(pc), "palette cb %.8f", bl[0].T);
+                plot.drawCurve(vx, vy).lineColor(pc).lineWidth(2).label("");
+            }
+            Figure fig = {{plot}};
+            Canvas canvas = {{fig}};
+            canvas.size(1000, 700);
+            char pf[512]; snprintf(pf, sizeof(pf), "%s/%s", plotdir, pngname);
+            canvas.save(pf);
+            printf("  Written %s\n", pf);
+        };
+
+        // Phase overlap P(q_phi)
+        {
+            char df[512]; snprintf(df, sizeof(df), "%s/phase_overlap.dat", outdir);
+            make_dist_plot(df,
+                "{/Helvetica-Oblique q}_{/Symbol f}",
+                "{/Helvetica-Oblique P}({/Helvetica-Oblique q}_{/Symbol f})",
+                "phase_overlap.png");
+            make_dist_plot(df,
+                "{/Helvetica-Oblique q}_{/Symbol f}",
+                "{/Helvetica-Oblique P}({/Helvetica-Oblique q}_{/Symbol f})",
+                "phase_overlap_linear.png", false);
+        }
+
+        // Link overlap P(q_link)
+        {
+            char df[512]; snprintf(df, sizeof(df), "%s/link_overlap.dat", outdir);
+            make_dist_plot(df,
+                "{/Helvetica-Oblique q}_{link}",
+                "{/Helvetica-Oblique P}({/Helvetica-Oblique q}_{link})",
+                "link_overlap.png");
+            make_dist_plot(df,
+                "{/Helvetica-Oblique q}_{link}",
+                "{/Helvetica-Oblique P}({/Helvetica-Oblique q}_{link})",
+                "link_overlap_linear.png", false);
+        }
+
+        // Marginal P(|a|^2) — both log and linear
+        {
+            char df[512]; snprintf(df, sizeof(df), "%s/marginal_a2.dat", outdir);
+            make_dist_plot(df,
+                "|{/Helvetica-Oblique a}_k|^2",
+                "{/Helvetica-Oblique P}(|{/Helvetica-Oblique a}_k|^2)",
+                "marginal_a2_log.png", true);
+            make_dist_plot(df,
+                "|{/Helvetica-Oblique a}_k|^2",
+                "{/Helvetica-Oblique P}(|{/Helvetica-Oblique a}_k|^2)",
+                "marginal_a2.png", false);
+        }
+
+        // --- Glass observables combined plot (chi, g4, A vs T) ---
+        {
+            struct GOLine { double T, chi, chi_e, g4, g4_e, A, A_e; };
+            auto read_go = [](const char* path) {
+                std::vector<GOLine> rows;
+                FILE* f = fopen(path, "r");
+                if (!f) return rows;
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    GOLine r;
+                    if (sscanf(line, "%lf %lf %lf %lf %lf %lf %lf",
+                               &r.T, &r.chi, &r.chi_e, &r.g4, &r.g4_e, &r.A, &r.A_e) == 7)
+                        rows.push_back(r);
+                }
+                fclose(f);
+                return rows;
+            };
+
+            const char* tags[]   = {"parisi", "ifo", "exp_ifo", "phase", "link"};
+            const char* gnames[] = {"Parisi", "IFO", "exp-IFO", "Phase", "Link"};
+            const char* gcols[]  = {"#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00"};
+            const int ntags = 5;
+            std::vector<std::vector<GOLine>> godata(ntags);
+            for (int i = 0; i < ntags; i++) {
+                char gf[512]; snprintf(gf, sizeof(gf), "%s/%s_glass_observables.dat", outdir, tags[i]);
+                godata[i] = read_go(gf);
+            }
+
+            // Any data at all?
+            bool any = false;
+            for (int i = 0; i < ntags; i++) if (!godata[i].empty()) any = true;
+            if (any) {
+                // chi panel
+                Plot2D pChi; setup_analysis_plot(pChi);
+                pChi.gnuplot("set logscale x 10");
+                pChi.xlabel("{/Helvetica-Oblique T}");
+                pChi.ylabel("{/Symbol c}");
+                for (int i = 0; i < ntags; i++) {
+                    if (godata[i].empty()) continue;
+                    std::vector<double> vT, vC, vClo, vChi2;
+                    for (auto& r : godata[i]) {
+                        vT.push_back(r.T); vC.push_back(r.chi);
+                        vClo.push_back(r.chi - r.chi_e);
+                        vChi2.push_back(r.chi + r.chi_e);
+                    }
+                    pChi.drawCurvesFilled(vT, vClo, vChi2)
+                        .fillColor(gcols[i]).fillIntensity(0.2).fillTransparent()
+                        .lineColor(gcols[i]).lineWidth(0).labelNone();
+                    pChi.drawCurve(vT, vC).lineColor(gcols[i]).lineWidth(2).label(gnames[i]);
+                }
+
+                // g4 panel
+                Plot2D pG4; setup_analysis_plot(pG4);
+                pG4.gnuplot("set logscale x 10");
+                pG4.xlabel("{/Helvetica-Oblique T}");
+                pG4.ylabel("{/Helvetica-Oblique g}_4");
+                for (int i = 0; i < ntags; i++) {
+                    if (godata[i].empty()) continue;
+                    std::vector<double> vT, vG, vGlo, vGhi;
+                    for (auto& r : godata[i]) {
+                        vT.push_back(r.T); vG.push_back(r.g4);
+                        vGlo.push_back(r.g4 - r.g4_e);
+                        vGhi.push_back(r.g4 + r.g4_e);
+                    }
+                    pG4.drawCurvesFilled(vT, vGlo, vGhi)
+                        .fillColor(gcols[i]).fillIntensity(0.2).fillTransparent()
+                        .lineColor(gcols[i]).lineWidth(0).labelNone();
+                    pG4.drawCurve(vT, vG).lineColor(gcols[i]).lineWidth(2).label(gnames[i]);
+                }
+
+                // A panel
+                Plot2D pA; setup_analysis_plot(pA);
+                pA.gnuplot("set logscale x 10");
+                pA.xlabel("{/Helvetica-Oblique T}");
+                pA.ylabel("{/Helvetica-Oblique A}({/Helvetica-Oblique T})");
+                for (int i = 0; i < ntags; i++) {
+                    if (godata[i].empty()) continue;
+                    std::vector<double> vT, vA, vAlo, vAhi;
+                    for (auto& r : godata[i]) {
+                        vT.push_back(r.T); vA.push_back(r.A);
+                        vAlo.push_back(r.A - r.A_e);
+                        vAhi.push_back(r.A + r.A_e);
+                    }
+                    pA.drawCurvesFilled(vT, vAlo, vAhi)
+                        .fillColor(gcols[i]).fillIntensity(0.2).fillTransparent()
+                        .lineColor(gcols[i]).lineWidth(0).labelNone();
+                    pA.drawCurve(vT, vA).lineColor(gcols[i]).lineWidth(2).label(gnames[i]);
+                }
+
+                Figure fig = {{pChi, pG4, pA}};
+                Canvas canvas = {{fig}};
+                canvas.size(1800, 600);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/glass_observables.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
+            }
+        }
+
+        // --- IPR plot (Y2 and 1/Y2 vs T) ---
+        {
+            struct IPRLine { double T, y2, y2e, y4, y4e; };
+            std::vector<IPRLine> ipr_rows;
+            char iprfile[512]; snprintf(iprfile, sizeof(iprfile), "%s/ipr.dat", outdir);
+            FILE* f = fopen(iprfile, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof(line), f)) {
+                    if (line[0] == '#' || line[0] == '\n') continue;
+                    IPRLine r;
+                    if (sscanf(line, "%lf %lf %lf %lf %lf",
+                               &r.T, &r.y2, &r.y2e, &r.y4, &r.y4e) == 5)
+                        ipr_rows.push_back(r);
+                }
+                fclose(f);
+            }
+            if (!ipr_rows.empty()) {
+                std::vector<double> vT, vY2, vY2lo, vY2hi, vInv, vInvLo, vInvHi;
+                for (auto& r : ipr_rows) {
+                    vT.push_back(r.T);
+                    vY2.push_back(r.y2);
+                    vY2lo.push_back(r.y2 - r.y2e);
+                    vY2hi.push_back(r.y2 + r.y2e);
+                    double inv = (r.y2 > 0) ? 1.0 / r.y2 : 0;
+                    double inv_e = (r.y2 > 0) ? r.y2e / (r.y2 * r.y2) : 0;
+                    vInv.push_back(inv);
+                    vInvLo.push_back(inv - inv_e);
+                    vInvHi.push_back(inv + inv_e);
+                }
+
+                Plot2D p1; setup_analysis_plot(p1);
+                p1.gnuplot("set logscale x 10");
+                p1.xlabel("{/Helvetica-Oblique T}");
+                p1.ylabel("{/Helvetica-Oblique Y}_2");
+                p1.legend().hide();
+                p1.drawCurvesFilled(vT, vY2lo, vY2hi)
+                    .fillColor("#e41a1c").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#e41a1c").lineWidth(0).labelNone();
+                p1.drawCurve(vT, vY2).lineColor("#e41a1c").lineWidth(2).label("");
+
+                Plot2D p2; setup_analysis_plot(p2);
+                p2.gnuplot("set logscale x 10");
+                p2.xlabel("{/Helvetica-Oblique T}");
+                p2.ylabel("1/{/Helvetica-Oblique Y}_2  (participating modes)");
+                p2.legend().hide();
+                p2.drawCurvesFilled(vT, vInvLo, vInvHi)
+                    .fillColor("#377eb8").fillIntensity(0.3).fillTransparent()
+                    .lineColor("#377eb8").lineWidth(0).labelNone();
+                p2.drawCurve(vT, vInv).lineColor("#377eb8").lineWidth(2).label("");
+
+                Figure fig = {{p1, p2}};
+                Canvas canvas = {{fig}};
+                canvas.size(1400, 500);
+                char pf[512]; snprintf(pf, sizeof(pf), "%s/ipr.png", plotdir);
+                canvas.save(pf);
+                printf("  Written %s\n", pf);
             }
         }
     }
