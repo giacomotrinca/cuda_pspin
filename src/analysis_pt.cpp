@@ -20,6 +20,7 @@
 #include <cmath>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <algorithm>
 #include <set>
@@ -2902,26 +2903,31 @@ int main(int argc, char** argv) {
     // For triplets (a,b,c), compute overlaps q_ab, q_bc, q_ac
     // Sort: q1 <= q2 <= q3. Ultrametric => q1 ~ q2.
     //
-    // STREAMING: 2D histogram + running mean instead of storing all
-    // raw points. Memory: O(nbins² × ntemps) instead of O(ntriplets).
-    // Snapshot subsampling to cap O(nrep³ × nsnap) computation.
+    // OPTIMIZED:
+    //  - Pre-build iter→index map (avoids O(nsnap) linear scan in find_entry)
+    //  - Pre-compute pairwise overlap matrix per snapshot:
+    //    C(nrep,2) O(N) ops instead of 3×C(nrep,3) = ~100× fewer
+    //  - Triplet enumeration uses O(1) matrix lookups
+    //  - 2D histogram streaming (no raw-point storage)
+    //  - Snapshot subsampling to cap compute
     // ================================================================
     if (nrep >= 3) {
         printf("\n── Ultrametricity test (nrep=%d, threads=%d) ───────\n", nrep, nthreads);
 
         const int nbins_um = 100;
-        const double d12_max = 2.0;           // |q1-q2| ∈ [0, 2]
+        const double d12_max = 2.0;
         const double q3_min = -1.0, q3_max = 1.0;
         const double d12_dbin = d12_max / nbins_um;
         const double q3_dbin  = (q3_max - q3_min) / nbins_um;
-        const int max_iters_um = 256;         // cap snapshots per (ti,s)
+        const int max_iters_um = 256;
 
-        // 2D histogram accumulated over all samples — ~3 MB total
         std::vector<std::vector<double>> hist2d(ntemps,
             std::vector<double>(nbins_um * nbins_um, 0.0));
-        // Per-sample mean |q1-q2| for jackknife
         std::vector<std::vector<double>> mean_d12_s(nsamples,
             std::vector<double>(ntemps, 0.0));
+
+        // Number of pairs for the flat upper-triangular overlap matrix
+        const int npairs = nrep * (nrep - 1) / 2;
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
@@ -2930,14 +2936,29 @@ int main(int argc, char** argv) {
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
+            // Pre-build iter→index map for each (tidx, rep)
+            // iter_map[tidx][rep][iter] = index in entries[]
+            std::vector<std::vector<std::unordered_map<int,int>>> iter_map(
+                cstore.NT, std::vector<std::unordered_map<int,int>>(nrep));
+            for (int t = 0; t < cstore.NT; t++)
+                for (int r = 0; r < nrep; r++) {
+                    auto& ev = cstore.entries[t][r];
+                    iter_map[t][r].reserve(ev.size());
+                    for (int idx = 0; idx < (int)ev.size(); idx++)
+                        iter_map[t][r][ev[idx].iter] = idx;
+                }
+
             std::atomic<int> ti_next(0);
             auto worker = [&](int /*id*/) {
+                // Thread-local overlap matrix (re-used per snapshot)
+                std::vector<double> qmat(npairs);
+
                 while (true) {
                     int ti = ti_next.fetch_add(1);
                     if (ti >= ntemps) break;
                     int tidx = all_data[ref][ti].tidx;
 
-                    // Find common iterations across all replicas
+                    // Find common iterations
                     auto iters0 = cstore.get_iters(tidx, 0);
                     std::set<int> common(iters0.begin(), iters0.end());
                     for (int r = 1; r < nrep; r++) {
@@ -2952,49 +2973,66 @@ int main(int argc, char** argv) {
                     std::vector<int> c_iters(common.begin(), common.end());
                     if (c_iters.empty()) continue;
 
-                    // Subsample snapshots if too many
                     if ((int)c_iters.size() > max_iters_um) {
                         std::mt19937 rng(42 + s * ntemps + ti);
                         std::shuffle(c_iters.begin(), c_iters.end(), rng);
                         c_iters.resize(max_iters_um);
                     }
 
-                    // Thread-local histogram + streaming mean
                     std::vector<double> local_hist(nbins_um * nbins_um, 0.0);
                     double sum_d12 = 0;
                     int count = 0;
 
                     for (int it : c_iters) {
-                        for (int ra = 0; ra < nrep; ra++)
-                            for (int rb = ra + 1; rb < nrep; rb++)
+                        // Gather entry pointers for all replicas via index map (O(1) each)
+                        std::vector<const std::vector<double>*> data_ptrs(nrep, nullptr);
+                        bool all_found = true;
+                        for (int r = 0; r < nrep; r++) {
+                            auto mit = iter_map[tidx][r].find(it);
+                            if (mit == iter_map[tidx][r].end()) { all_found = false; break; }
+                            data_ptrs[r] = &cstore.entries[tidx][r][mit->second].data;
+                        }
+                        if (!all_found) continue;
+
+                        // Pre-compute pairwise overlap matrix: C(nrep,2) O(N) ops
+                        int pidx = 0;
+                        for (int ra = 0; ra < nrep; ra++) {
+                            const double* da = data_ptrs[ra]->data();
+                            for (int rb = ra + 1; rb < nrep; rb++) {
+                                const double* db = data_ptrs[rb]->data();
+                                double num = 0, n1 = 0, n2 = 0;
+                                for (int k = 0; k < N; k++) {
+                                    double r1 = da[2*k], i1 = da[2*k+1];
+                                    double r2 = db[2*k], i2 = db[2*k+1];
+                                    num += r1*r2 + i1*i2;
+                                    n1 += r1*r1 + i1*i1;
+                                    n2 += r2*r2 + i2*i2;
+                                }
+                                double norm = sqrt(n1 * n2);
+                                qmat[pidx++] = (norm > 0) ? num / norm : 0.0;
+                            }
+                        }
+
+                        // Enumerate triplets with O(1) lookups into qmat
+                        // Pair index for (ra, rb) with ra < rb:
+                        //   pidx(ra, rb) = ra * nrep - ra*(ra+1)/2 + (rb - ra - 1)
+                        for (int ra = 0; ra < nrep; ra++) {
+                            int base_a = ra * nrep - ra * (ra + 1) / 2 - ra - 1;
+                            for (int rb = ra + 1; rb < nrep; rb++) {
+                                int idx_ab = base_a + rb;
+                                int base_b = rb * nrep - rb * (rb + 1) / 2 - rb - 1;
                                 for (int rc = rb + 1; rc < nrep; rc++) {
-                                    auto* ea = cstore.find_entry(tidx, ra, it);
-                                    auto* eb = cstore.find_entry(tidx, rb, it);
-                                    auto* ec = cstore.find_entry(tidx, rc, it);
-                                    if (!ea || !eb || !ec) continue;
-
-                                    auto overlap = [&](const std::vector<double>& d1,
-                                                       const std::vector<double>& d2) {
-                                        double num = 0, n1 = 0, n2 = 0;
-                                        for (int k = 0; k < N; k++) {
-                                            double r1 = d1[2*k], i1 = d1[2*k+1];
-                                            double r2 = d2[2*k], i2 = d2[2*k+1];
-                                            num += r1*r2 + i1*i2;
-                                            n1 += r1*r1 + i1*i1;
-                                            n2 += r2*r2 + i2*i2;
-                                        }
-                                        double norm = sqrt(n1 * n2);
-                                        return (norm > 0) ? num / norm : 0.0;
+                                    double q_arr[3] = {
+                                        qmat[idx_ab],
+                                        qmat[base_b + rc],           // (rb, rc)
+                                        qmat[base_a + rc]            // (ra, rc)
                                     };
-
-                                    double q[3] = {
-                                        overlap(ea->data, eb->data),
-                                        overlap(eb->data, ec->data),
-                                        overlap(ea->data, ec->data)
-                                    };
-                                    std::sort(q, q + 3);
-                                    double d12 = fabs(q[0] - q[1]);
-                                    double q3  = q[2];
+                                    // Partial sort: find min and second-min
+                                    if (q_arr[0] > q_arr[1]) std::swap(q_arr[0], q_arr[1]);
+                                    if (q_arr[1] > q_arr[2]) std::swap(q_arr[1], q_arr[2]);
+                                    if (q_arr[0] > q_arr[1]) std::swap(q_arr[0], q_arr[1]);
+                                    double d12 = fabs(q_arr[0] - q_arr[1]);
+                                    double q3  = q_arr[2];
 
                                     int b_d12 = (int)(d12 / d12_dbin);
                                     int b_q3  = (int)((q3 - q3_min) / q3_dbin);
@@ -3005,9 +3043,10 @@ int main(int argc, char** argv) {
                                     sum_d12 += d12;
                                     count++;
                                 }
+                            }
+                        }
                     }
 
-                    // Merge — no lock: unique ti per thread, join between samples
                     for (int i = 0; i < nbins_um * nbins_um; i++)
                         hist2d[ti][i] += local_hist[i];
                     mean_d12_s[s][ti] = (count > 0) ? sum_d12 / count : 0.0;
