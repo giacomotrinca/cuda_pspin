@@ -13,6 +13,7 @@ for arg in "$@"; do
         --nrep=*)    NREP="${arg#*=}" ;;
         --label=*)   LABEL="${arg#*=}" ;;
         --datadir=*) DATADIR="${arg#*=}" ;;
+        --deeper)    ;; # accepted for compatibility
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N      Number of spins (default: $SIZE)"

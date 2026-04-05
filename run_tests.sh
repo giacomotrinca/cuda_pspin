@@ -55,8 +55,8 @@ echo -e "${CYN}═════════════════════�
 echo ""
 
 # ── build ──────────────────────────────────────────────────────────────────
-echo -e "${YEL}Building tests...  (make tests ${MAKE_ARGS})${NC}"
-if ! make tests ${MAKE_ARGS} 2>&1 | tee "${OUTDIR}/build.log"; then
+echo -e "${YEL}Building tests...  (make tests bench_pt ${MAKE_ARGS})${NC}"
+if ! make tests bench_pt ${MAKE_ARGS} 2>&1 | tee "${OUTDIR}/build.log"; then
     echo -e "${RED}BUILD FAILED — see ${OUTDIR}/build.log${NC}"
     exit 2
 fi
@@ -96,6 +96,7 @@ run_one  fmc_mask            bin/test_fmc_mask            10 1.0 1
 run_one  replica_exchange    bin/test_replica_exchange    8 6 65536 5
 run_one  sparse_dense        bin/test_sparse_dense        10 4 300
 run_one  mean_shift          bin/test_mean_shift          12 0.5
+run_one  pt_scaling          bin/bench_pt_scaling         -sweeps 200 -warmup 50
 
 # ── summary text ───────────────────────────────────────────────────────────
 {
@@ -386,6 +387,78 @@ plot "${OUTDIR}/mean_shift.dat" using (\$1-0.17):2 with boxes lc rgb "${COL_A}" 
      "${OUTDIR}/mean_shift.dat" using (\$1+0.17):3 with boxes lc rgb "${COL_PASS}" title "Actual"
 EOF
 echo "  ✓ plot_mean_shift.png"
+fi
+
+# ── 10. PT sweep time scaling ─────────────────────────────────────────────
+# Dense plots
+for SCAN in N NT NREP; do
+    DATFILE="${OUTDIR}/sweep_time_vs_${SCAN}.dat"
+    if [ -s "$DATFILE" ]; then
+        case "$SCAN" in
+            N)    XLABEL="N (number of spins)"; FIXED="NT=4, NREP=4" ;;
+            NT)   XLABEL="NT (temperature replicas)"; FIXED="N=16, NREP=4" ;;
+            NREP) XLABEL="NREP (real replicas/T)"; FIXED="N=16, NT=4" ;;
+        esac
+gnuplot <<EOF
+${GP_TERM}
+set output "${OUTDIR}/plot_sweep_vs_${SCAN}.png"
+${GP_GRID}
+set title "Dense PT: sweep time vs ${SCAN}  (${FIXED}) — GPU: ${GPU_RAW}" font ",16"
+set xlabel "${XLABEL}"
+set ylabel "seconds / sweep"
+set logscale xy
+set format y "10^{%T}"
+set format x "10^{%T}"
+set key noautotitle
+plot "${DATFILE}" using 1:6 with linespoints pt 7 ps 1.8 lc rgb "${COL_A}" lw 2.5
+EOF
+echo "  ✓ plot_sweep_vs_${SCAN}.png"
+    fi
+done
+
+# Sparse plots
+for SCAN in N NT NREP; do
+    DATFILE="${OUTDIR}/sweep_time_vs_${SCAN}_sparse.dat"
+    if [ -s "$DATFILE" ]; then
+        case "$SCAN" in
+            N)    XLABEL="N (number of spins)"; FIXED="NT=4, NREP=4" ;;
+            NT)   XLABEL="NT (temperature replicas)"; FIXED="N=16, NREP=4" ;;
+            NREP) XLABEL="NREP (real replicas/T)"; FIXED="N=16, NT=4" ;;
+        esac
+gnuplot <<EOF
+${GP_TERM}
+set output "${OUTDIR}/plot_sweep_vs_${SCAN}_sparse.png"
+${GP_GRID}
+set title "Sparse PT: sweep time vs ${SCAN}  (${FIXED}) — GPU: ${GPU_RAW}" font ",16"
+set xlabel "${XLABEL}"
+set ylabel "seconds / sweep"
+set logscale xy
+set format y "10^{%T}"
+set format x "10^{%T}"
+set key noautotitle
+plot "${DATFILE}" using 1:6 with linespoints pt 7 ps 1.8 lc rgb "${COL_B}" lw 2.5
+EOF
+echo "  ✓ plot_sweep_vs_${SCAN}_sparse.png"
+    fi
+done
+
+# Combined dense vs sparse overlay (vs N)
+if [ -s "${OUTDIR}/sweep_time_vs_N.dat" ] && [ -s "${OUTDIR}/sweep_time_vs_N_sparse.dat" ]; then
+gnuplot <<EOF
+${GP_TERM}
+set output "${OUTDIR}/plot_sweep_vs_N_compare.png"
+${GP_GRID}
+set title "Dense vs Sparse PT: sweep time vs N  (NT=4, NREP=4) — GPU: ${GPU_RAW}" font ",16"
+set xlabel "N (number of spins)"
+set ylabel "seconds / sweep"
+set logscale xy
+set format y "10^{%T}"
+set format x "10^{%T}"
+set key top left
+plot "${OUTDIR}/sweep_time_vs_N.dat" using 1:6 with linespoints pt 7 ps 1.8 lc rgb "${COL_A}" lw 2.5 title "Dense", \
+     "${OUTDIR}/sweep_time_vs_N_sparse.dat" using 1:6 with linespoints pt 9 ps 1.8 lc rgb "${COL_B}" lw 2.5 title "Sparse"
+EOF
+echo "  ✓ plot_sweep_vs_N_compare.png"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -143,9 +143,10 @@ __global__ void fmc_filter_g2_kernel(cuDoubleComplex* g2, const double* omega,
     }
 }
 
-// 3-channel FMC mask filter: processes C(N,4) quartets.
-// For each quartet, clears the mask bit of channels whose FMC condition
-// is not satisfied, leaving the coupling array untouched.
+// Single-channel FMC mask filter: processes C(N,4) quartets.
+// For each quartet, checks permutations in order (ch 0, 1, 2).
+// The first channel satisfying FMC wins; mask stores that single bit.
+// If no channel passes, mask = 0.
 // Channel-dependent conservation conditions (sorted ii<jj<kk<ll):
 //   ch 0: |w_ii+w_jj - w_kk-w_ll| <= gamma
 //   ch 1: |w_ii+w_ll - w_jj-w_kk| <= gamma
@@ -170,25 +171,22 @@ __global__ void fmc_filter_g4_mask_kernel(uint8_t* mask, const double* omega,
     rem -= (long long)jj * (jj - 1) / 2;
     int ii = (int)rem;
 
-    uint8_t m = mask[q];
-
-    // ch 0: |w_ii + w_jj - w_kk - w_ll|
-    if (fabs(omega[ii] + omega[jj] - omega[kk] - omega[ll]) > gamma)
-        m &= ~(1u << 0);
-    // ch 1: |w_ii + w_ll - w_jj - w_kk|
-    if (fabs(omega[ii] + omega[ll] - omega[jj] - omega[kk]) > gamma)
-        m &= ~(1u << 1);
-    // ch 2: |w_ii + w_kk - w_jj - w_ll|
-    if (fabs(omega[ii] + omega[kk] - omega[jj] - omega[ll]) > gamma)
-        m &= ~(1u << 2);
+    // First-pass-wins: check ch 0, then ch 1, then ch 2
+    uint8_t m = 0;
+    if (fabs(omega[ii] + omega[jj] - omega[kk] - omega[ll]) <= gamma)
+        m = (1u << 0);
+    else if (fabs(omega[ii] + omega[ll] - omega[jj] - omega[kk]) <= gamma)
+        m = (1u << 1);
+    else if (fabs(omega[ii] + omega[kk] - omega[jj] - omega[ll]) <= gamma)
+        m = (1u << 2);
 
     mask[q] = m;
 }
 
-// Kernel: set all mask entries to 0x7 (all 3 channels active)
+// Kernel: set all mask entries to 0x1 (only ch 0 active — fully connected default)
 __global__ void init_g4_mask_kernel(uint8_t* mask, long long nq) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < nq) mask[idx] = 0x7;
+    if (idx < nq) mask[idx] = 0x1;
 }
 
 void apply_fmc_g2(cuDoubleComplex* d_g2, int N, const double* d_omega, double gamma) {

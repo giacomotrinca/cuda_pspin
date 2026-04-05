@@ -233,7 +233,7 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-nbins_spec <B>] [--plot] [--log-temp]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-nbins_spec <B>] [--plot] [--log-temp] [--deeper]\n", prog);
     exit(1);
 }
 
@@ -255,6 +255,8 @@ int main(int argc, char** argv) {
             do_plot = true;
         else if (strcmp(argv[i], "--log-temp") == 0)
             log_temp = true;
+        else if (strcmp(argv[i], "--deeper") == 0)
+            {} // accepted for script compatibility
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);

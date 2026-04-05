@@ -7,7 +7,7 @@
 // Compute the full energy H = H2 + H4
 // H2 = -sum_{i<j} Re[ g2_ij a_i a*_j ]
 // H4 = -sum_{i<j<k<l} Re[ g4_ijkl a_i a*_j a_k a*_l ]
-// g4 has C(N,4) entries; g4_mask has C(N,4) uint8_t bitmasks (3 bits for channels)
+// g4 has C(N,4) entries; g4_mask has C(N,4) uint8_t with at most 1 bit set (single channel)
 double compute_energy(
     const cuDoubleComplex* d_spins,
     const cuDoubleComplex* d_g2,

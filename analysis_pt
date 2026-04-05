@@ -10,6 +10,7 @@ NTHREADS=$(nproc)
 SPARSE=0
 COMPRESS=0
 LOG_TEMP=0
+DEEPER=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -20,6 +21,7 @@ for arg in "$@"; do
         --nthreads=*) NTHREADS="${arg#*=}" ;;
         --sparse)     SPARSE=1 ;;
         --log-temp)   LOG_TEMP=1 ;;
+        --deeper)     DEEPER=1 ;;
         --compress)   COMPRESS=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
@@ -30,6 +32,7 @@ for arg in "$@"; do
             echo "  --nthreads=T  Threads for overlap computation (default: $(nproc))"
             echo "  --sparse      Analyze sparse (PTS) data instead of standard (PT)"
             echo "  --log-temp    Use log scale for temperature axes and colorbars"
+            echo "  --deeper      Enable deeper analysis (ultrametricity, scatter, etc.)"
             echo "  --compress    Decompress before analysis, re-compress after"
             exit 0
             ;;
@@ -64,6 +67,9 @@ if [ "$SPARSE" -eq 1 ]; then
 fi
 if [ "$LOG_TEMP" -eq 1 ]; then
     CMD="$CMD --log-temp"
+fi
+if [ "$DEEPER" -eq 1 ]; then
+    CMD="$CMD --deeper"
 fi
 $CMD
 

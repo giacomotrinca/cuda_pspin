@@ -67,7 +67,7 @@ __global__ void mc_sweep_kernel(
     cuDoubleComplex* all_spins,   // [nrep * N]
     const cuDoubleComplex* g2,    // [N * N] shared
     const cuDoubleComplex* g4,    // [C(N,4)] shared
-    const uint8_t* g4_mask,       // [C(N,4)] 3-bit channel mask
+    const uint8_t* g4_mask,       // [C(N,4)] single-channel mask
     int N, int nrep,
     const double* betas,
     curandStatePhilox4_32_10_t* rng_states,  // [nrep]
@@ -242,7 +242,7 @@ __global__ void mc_sweep_kernel(
                         + (long long)kk*(kk-1)*(kk-2)/6
                         + (long long)jj*(jj-1)/2 + ii;
 
-            // Look up coupling once (shared across all 3 channels)
+            // Look up coupling (shared across channels; mask selects the single active one)
             cuDoubleComplex gq = g4[q];
             uint8_t qmask = g4_mask[q];
             // Skip if coupling is zero or all channels filtered
@@ -354,7 +354,7 @@ __global__ void init_energy_kernel(
         }
     }
 
-    // H4: iterate over C(N,4) quartets, inner loop on 3 channels using mask
+    // H4: iterate over C(N,4) quartets, single channel via mask
     long long nq = (long long)N * (N - 1) * (N - 2) * (N - 3) / 24;
     for (long long q = (long long)blockIdx.x * bdim + tid; q < nq;
          q += (long long)gridDim.x * bdim) {
@@ -484,7 +484,7 @@ MCState mc_init(const SimConfig& cfg) {
     } else {
         state.h_omega = nullptr;
         state.n_pairs_active = n_pairs(N);
-        state.n_quart_active = n_g4_total(N);  // all 3 channels active
+        state.n_quart_active = n_g4_total(N);  // 1 channel per quartet (FC)
     }
 
     // Rescale couplings: Var = J_eff^2 * N / n_surviving

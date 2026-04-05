@@ -57,7 +57,7 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
     if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
 }
 
-// Kernel: compute H4 partial sums over C(N,4) quartets (3 channels via mask)
+// Kernel: compute H4 partial sums over C(N,4) quartets (single channel via mask)
 // Channel-dependent conjugation:
 //   ch 0: -Re[g4 * a_ii * a_jj * conj(a_kk) * conj(a_ll)]
 //   ch 1: -Re[g4 * a_ii * conj(a_jj) * conj(a_kk) * a_ll]

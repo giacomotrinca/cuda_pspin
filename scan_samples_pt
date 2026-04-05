@@ -8,10 +8,10 @@ SIZE=18
 TMAX=1.6
 TMIN=0.05
 NT=30
-J=2.0
-J0=0.0
-ALPHA=0.5
-ALPHA0=0.5
+J=2.0 
+R="inf"   # R = J/J0  (inf => J0=0, pure disorder)
+ALPHA=0.5 # 4-body fraction of couplings (alpha=0 => pure SK, alpha=1 => pure H4)
+ALPHA0=0.5 
 ITER=20
 SEED=$RANDOM
 NREP=16
@@ -34,7 +34,7 @@ for arg in "$@"; do
         --tmin=*)      TMIN="${arg#*=}" ;;
         --nt=*)        NT="${arg#*=}" ;;
         --J=*)         J="${arg#*=}" ;;
-        --J0=*)        J0="${arg#*=}" ;;
+        --R=*)         R="${arg#*=}" ;;
         --alpha=*)     ALPHA="${arg#*=}" ;;
         --alpha0=*)    ALPHA0="${arg#*=}" ;;
         --iter=*)      ITER="${arg#*=}" ;;
@@ -57,7 +57,7 @@ for arg in "$@"; do
             echo "  --tmin=T        Min temperature (default: $TMIN)"
             echo "  --nt=N          Number of temperatures (default: $NT)"
             echo "  --J=J           Coupling scale (default: $J)"
-            echo "  --J0=J0         Mean coupling scale (default: $J0)"
+            echo "  --R=R           Ratio J/J0, 'inf' for pure disorder (default: $R)"
             echo "  --alpha=A       4-body fraction of J (default: $ALPHA)"
             echo "  --alpha0=A0     4-body fraction of J0 (default: $ALPHA0)"
             echo "  --iter=K        MC sweeps = 2^K (default: $ITER)"
@@ -82,6 +82,13 @@ for arg in "$@"; do
     esac
 done
 
+# Compute J0 from R = J/J0
+if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
+    J0=0.0
+else
+    J0=$(awk "BEGIN {printf \"%.6g\", $J / $R}")
+fi
+
 SWEEPS=$((1 << ITER))
 TOTAL_REPLICAS=$((NT * NREP))
 
@@ -102,7 +109,8 @@ printf "  %-22s %s\n" "total replicas" "$TOTAL_REPLICAS"
 printf "  %-22s %s\n" "Tmax" "$TMAX"
 printf "  %-22s %s\n" "Tmin" "$TMIN"
 printf "  %-22s %s\n" "J" "$J"
-printf "  %-22s %s\n" "J0" "$J0"
+printf "  %-22s %s\n" "R = J/J0" "$R"
+printf "  %-22s %s\n" "J0 (computed)" "$J0"
 printf "  %-22s %s\n" "alpha" "$ALPHA"
 printf "  %-22s %s\n" "alpha0" "$ALPHA0"
 printf "  %-22s %s  (2^%s)\n" "sweeps" "$SWEEPS" "$ITER"

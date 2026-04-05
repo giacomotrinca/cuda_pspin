@@ -199,7 +199,7 @@ static void mkdir_p(const char* path) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>] [-nbins_spec <B>] [--plot]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> [-nrep <nrep>] [-label <l>] [-datadir <path>] [-T <temperature>] [-nbins_spec <B>] [--plot] [--deeper]\n", prog);
     fprintf(stderr, "  Without -label: averages over all samples S0, S1, ...\n");
     fprintf(stderr, "  With -label L:  analyzes single sample SL only\n");
     fprintf(stderr, "  -T: simulation temperature (default 1.0, used for spectrum output)\n");
@@ -316,6 +316,8 @@ int main(int argc, char** argv) {
             nbins_spec = atoi(argv[++i]);
         else if (strcmp(argv[i], "--plot") == 0)
             do_plot = true;
+        else if (strcmp(argv[i], "--deeper") == 0)
+            {} // accepted for script compatibility
         else usage(argv[0]);
     }
     if (N < 4) usage(argv[0]);

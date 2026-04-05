@@ -10,6 +10,10 @@ LIB_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
 # sparse variant: smoothed-cube constraint + sparse H4
 LIB_SPARSE_OBJ = obj/config.o obj/disorder.o obj/mc_sparse.o obj/spins_sparse.o
 
+# combined (dense + sparse) for benchmarks that need both
+LIB_ALL_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o \
+              obj/mc_sparse.o obj/spins_sparse.o
+
 ifdef visnu
   ARCH = sm_30
 else
@@ -20,7 +24,7 @@ NVFLAGS = -std=c++11 -arch=$(ARCH) -O3 -Iinclude -DNDEBUG
 CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 
-.PHONY: all clean mc sa pt pts analysis_mc analysis_sa analysis_pt bench bench_plot smcu_test \
+.PHONY: all clean mc sa pt pts analysis_mc analysis_sa analysis_pt bench bench_plot bench_pt smcu_test \
        test_quartet test_spherical test_delta_e test_inf_temp test_detailed_balance \
        test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift tests
 
@@ -37,6 +41,7 @@ analysis_sa:  dirs bin/analysis_sa
 analysis_pt:  dirs bin/analysis_pt
 bench:        dirs bin/benchmark
 bench_plot:   dirs bin/plot_benchmark
+bench_pt:     dirs bin/bench_pt_scaling
 smcu_test:    dirs bin/smoothed_cube
 
 # --- test suite ---
@@ -72,6 +77,9 @@ bin/parallel_tempering_sparse: obj/parallel_tempering_sparse.o $(LIB_SPARSE_OBJ)
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
 bin/benchmark: obj/benchmark.o $(LIB_OBJ) | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/bench_pt_scaling: obj/bench_pt_scaling.o $(LIB_ALL_OBJ) | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
 bin/smoothed_cube: obj/smoothed_cube.o obj/spins_sparse.o | dirs

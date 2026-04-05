@@ -10,7 +10,7 @@ struct MCState {
     // Shared disorder (same for all replicas)
     cuDoubleComplex* d_g2;       // device: 2-body couplings [N*N]
     cuDoubleComplex* d_g4;       // device: 4-body couplings [C(N,4)]
-    uint8_t*         d_g4_mask;  // device: 3-bit channel mask per quartet [C(N,4)]
+    uint8_t*         d_g4_mask;  // device: single-channel mask per quartet [C(N,4)]
 
     // Per-replica data (contiguous, indexed by replica)
     cuDoubleComplex* d_spins;    // device: spin configurations [nrep * N]

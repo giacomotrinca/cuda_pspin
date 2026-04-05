@@ -6,18 +6,21 @@ SIZE=18
 NREP=4
 COMPRESS=0
 LOG_TEMP=0
+DEEPER=0
 
 for arg in "$@"; do
     case "$arg" in
         --size=*)   SIZE="${arg#*=}" ;;
         --nrep=*)   NREP="${arg#*=}" ;;
         --log-temp) LOG_TEMP=1 ;;
+        --deeper)   DEEPER=1 ;;
         --compress) COMPRESS=1 ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo "  --size=N    Number of spins (default: $SIZE)"
             echo "  --nrep=R    Number of replicas (default: $NREP)"
             echo "  --log-temp  Use log scale for temperature axes and colorbars"
+            echo "  --deeper    Enable deeper analysis (accepted for compatibility)"
             echo "  --compress  Decompress before analysis, re-compress after"
             exit 0
             ;;
@@ -43,6 +46,9 @@ fi
 CMD="./bin/analysis_sa -N $SIZE -nrep $NREP --plot"
 if [ "$LOG_TEMP" -eq 1 ]; then
     CMD="$CMD --log-temp"
+fi
+if [ "$DEEPER" -eq 1 ]; then
+    CMD="$CMD --deeper"
 fi
 $CMD
 

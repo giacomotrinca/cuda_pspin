@@ -1,0 +1,323 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{physics}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+
+\newcommand{\ai}{a_i}
+\newcommand{\aj}{a_j}
+\newcommand{\Sfour}{S_4}
+
+\title{Monte Carlo move on the smoothed-cube manifold\\
+       for the $2{+}4$ $p$-spin model with sparse interactions}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%% ============================================================
+\section{Model and configuration space}
+%% ============================================================
+
+We consider $N$ complex amplitudes $\{a_k\}_{k=1}^{N}$, $a_k\in\mathbb{C}$,
+subject to the \emph{smoothed-cube} constraint
+\begin{equation}\label{eq:cube}
+  \sum_{k=1}^{N} \abs{a_k}^4 = N \,.
+\end{equation}
+This quartic normalisation defines a smooth, compact sub-manifold of
+$\mathbb{C}^N$ that interpolates between the $\ell^4$ unit ball (a
+``rounded hypercube'') and the standard sphere $\sum\abs{a_k}^2=\mathrm{const}$.
+
+The Hamiltonian is the sum of a two-body and a four-body interaction,
+\begin{equation}\label{eq:H}
+  H = H_2 + H_4 \,,
+\end{equation}
+with
+\begin{align}
+  H_2 &= -\sum_{i<j} \Re\bigl[ g^{(2)}_{ij}\, a_i\, a_j^* \bigr] \,,
+  \label{eq:H2}\\[4pt]
+  H_4 &= -\sum_{i<j<k<l}
+         \Re\bigl[ g^{(4)}_{ijkl}\, f_{c(ijkl)}(a_i,a_j,a_k,a_l) \bigr] \,,
+  \label{eq:H4}
+\end{align}
+where each ordered quartet $(i<j<k<l)$ is assigned a \emph{unique}
+interaction channel $c(ijkl)\in\{0,1,2\}$, and the product $f_c$ depends
+on $c$:
+\begin{alignat}{2}
+  c=0:&\quad f_0 = a_i\, a_j\, a_k^*\, a_l^* \,,
+       &\qquad & \text{conjugation on slots } \{3,4\}\,,\notag\\
+  c=1:&\quad f_1 = a_i\, a_j^*\, a_k^*\, a_l \,,
+       && \text{conjugation on slots } \{2,3\}\,,\notag\\
+  c=2:&\quad f_2 = a_i\, a_j^*\, a_k\, a_l^* \,,
+       && \text{conjugation on slots } \{2,4\}\,.\notag
+\end{alignat}
+The coupling $g^{(2)}_{ij}$ is a quenched random variable; $g^{(4)}_{ijkl}$
+is likewise random and depends only on the quartet (the spatial overlap
+integral is symmetric under permutations of the four indices, so all three
+channel candidates share the same coupling value).
+
+The channel $c(ijkl)$ is selected by a \emph{frequency-matching condition}
+(FMC).  For each quartet $(i<j<k<l)$ one checks the resonance conditions
+\begin{alignat}{2}
+  c=0:&\quad \abs{\omega_i+\omega_j-\omega_k-\omega_l} \le \gamma\,,\notag\\
+  c=1:&\quad \abs{\omega_i+\omega_l-\omega_j-\omega_k} \le \gamma\,,\notag\\
+  c=2:&\quad \abs{\omega_i+\omega_k-\omega_j-\omega_l} \le \gamma\,,\notag
+\end{alignat}
+in this fixed order; the \emph{first} channel that passes is assigned to
+the quartet.  If none passes, the quartet is inactive ($g^{(4)}_{ijkl}$
+does not contribute to $H_4$).  In the fully-connected limit
+($\gamma\to\infty$, or no FMC) every quartet is assigned channel~$0$.
+This ensures that each quartet contributes \emph{at most one} term to the
+Hamiltonian, which is a physical requirement.
+
+In the \textbf{sparse} variant the quartic interaction retains only $N$
+randomly sub-sampled quartet entries from the $O(N^4)$ FMC-surviving set,
+reducing the cost of a single energy evaluation from $O(N^4)$ to $O(N)$.
+
+%% ============================================================
+\section{The pair-rotation move}
+%% ============================================================
+
+A Monte Carlo (MC) sweep consists of $\lfloor N/2\rfloor$ elementary
+\emph{pair-rotation} steps.
+Each step selects a uniformly random pair of indices $i\neq j$ and proposes
+a new configuration that modifies only $a_i$ and $a_j$ while leaving all
+other amplitudes unchanged and preserving the global constraint~\eqref{eq:cube}.
+
+\subsection{Conserved pairwise quantity}
+
+The key observation is that the global constraint $\sum_k\abs{a_k}^4 = N$
+is preserved if and only if the \emph{pairwise fourth-moment sum}
+\begin{equation}\label{eq:S4}
+  \Sfour \;\equiv\; \abs{\ai}^4 + \abs{\aj}^4
+\end{equation}
+is conserved by the move.  This decouples the pair $(i,j)$ from the rest of
+the configuration.
+
+\subsection{Parametrisation and flat measure}\label{sec:param}
+
+We parametrise the pair on the constraint surface $\Sfour = \mathrm{const}$
+by three coordinates $(u,\,\varphi_1,\,\varphi_2)$:
+\begin{equation}\label{eq:param}
+  a_i = \abs{a_i}\, e^{i\varphi_1}\,,\qquad
+  a_j = \abs{a_j}\, e^{i\varphi_2}\,,
+\end{equation}
+with the moduli determined by
+\begin{equation}\label{eq:moduli}
+  \abs{a_i}^2 = \sqrt{\Sfour}\,\sqrt{1-u}\,,\qquad
+  \abs{a_j}^2 = \sqrt{\Sfour}\,\sqrt{u}\,,\qquad
+  u\in[0,1]\,.
+\end{equation}
+One easily verifies that
+$\abs{a_i}^4 + \abs{a_j}^4 = \Sfour(1-u) + \Sfour\, u = \Sfour$, so the
+constraint is satisfied for all $u$.
+
+The variable $u = \abs{a_j}^4/\Sfour$ is chosen so that the
+\emph{Riemannian measure} induced on the constraint surface is flat:
+\begin{equation}\label{eq:measure}
+  \dd\mu \;\propto\; \dd u\;\dd\varphi_1\;\dd\varphi_2 \,.
+\end{equation}
+This can be seen via the standard change of variables from the angular
+parametrisation $\abs{a_i}^2 = \sqrt{\Sfour}\cos\alpha$,
+$\abs{a_j}^2 = \sqrt{\Sfour}\sin\alpha$, where the measure carries a
+Jacobian factor $\sin\alpha\cos\alpha\,\dd\alpha$.  Setting
+$u = \sin^2\!\alpha$ gives $\dd u = 2\sin\alpha\cos\alpha\,\dd\alpha$, which
+precisely cancels the Jacobian and yields~\eqref{eq:measure}.
+
+\medskip\noindent\textbf{Remark.}
+An earlier version of the code sampled $\alpha$ uniformly in $[0,\pi/2)$,
+which fails to reproduce the measure~\eqref{eq:measure}: the proposal
+density $q(\alpha) = 2/\pi$ differs from the constraint-surface measure
+$\mu(\alpha)\propto\sin\alpha\cos\alpha$.  For Metropolis--Hastings
+correctness one would then need to include the ratio
+$\sin\alpha'\cos\alpha'\!/\!\sin\alpha\cos\alpha$ in the acceptance
+probability.  The $u$-parametrisation eliminates this complication entirely.
+
+%% ============================================================
+\section{Proposal distribution and detailed balance}
+%% ============================================================
+
+Given the current spin configuration with values $a_i^{\mathrm{old}}$,
+$a_j^{\mathrm{old}}$, the proposal draws
+\begin{equation}\label{eq:proposal}
+  u \sim \mathrm{Uniform}(0,1)\,,\qquad
+  \varphi_1 \sim \mathrm{Uniform}(0,2\pi)\,,\qquad
+  \varphi_2 \sim \mathrm{Uniform}(0,2\pi)\,,
+\end{equation}
+independently.  The proposed amplitudes are then
+\begin{equation}\label{eq:new_spins}
+  a_i' = \sqrt{\sqrt{\Sfour}\,\sqrt{1-u}}\;
+         e^{\,i\varphi_1}\,,\qquad
+  a_j' = \sqrt{\sqrt{\Sfour}\,\sqrt{u}}\;
+         e^{\,i\varphi_2}\,.
+\end{equation}
+Note that the proposal~\eqref{eq:proposal} is \emph{independent} of the
+current state (it depends only on $\Sfour$, which is a constant of the
+move).  The proposal density in the flat coordinates $(u,\varphi_1,\varphi_2)$
+is therefore
+\[
+  q\bigl((u',\varphi_1',\varphi_2') \mid (u,\varphi_1,\varphi_2)\bigr)
+  = \frac{1}{1 \cdot 2\pi \cdot 2\pi}
+  = \frac{1}{4\pi^2}\,,
+\]
+which is symmetric:
+$q(\mathbf{x}'\mid\mathbf{x}) = q(\mathbf{x}\mid\mathbf{x}')$.
+
+Because both the proposal density and the constraint-surface measure are
+uniform in $(u,\varphi_1,\varphi_2)$, the Metropolis--Hastings ratio reduces
+to
+\begin{equation}\label{eq:acceptance}
+  A = \min\!\Bigl(1,\; e^{-\beta\,\Delta E}\Bigr)\,,
+\end{equation}
+with $\Delta E = H(\text{new}) - H(\text{old})$, and no additional Jacobian
+or proposal-ratio correction.
+
+%% ============================================================
+\section{Energy difference computation}
+%% ============================================================
+
+Because only spins $i$ and $j$ change, the energy difference decomposes
+into contributions from $H_2$ and $H_4$.
+
+\subsection{Two-body term}
+
+Defining $\delta_i = a_i' - a_i^{\mathrm{old}}$ and
+$\delta_j = a_j' - a_j^{\mathrm{old}}$, the change in $H_2$ can be
+written as
+\begin{equation}\label{eq:dE2}
+  \Delta E_2 = -\Re\Bigl[
+    \delta_i \sum_{k\neq i,j} g^{(2)}_{ik}\, a_k^*
+  + \delta_j \sum_{k\neq i,j} g^{(2)}_{jk}\, a_k^*
+  + g^{(2)}_{ij}\bigl(a_i' a_j'^* - a_i^{\mathrm{old}} a_j^{\mathrm{old}\,*}\bigr)
+  \Bigr]\,.
+\end{equation}
+This requires $O(N)$ work and is computed in parallel over the spin index
+$k$ (dense storage of $g^{(2)}$).
+
+\subsection{Four-body term (sparse)}
+
+Recall that each sparse entry $q$ stores a sorted quartet of indices
+$(i_1\!<\!i_2\!<\!i_3\!<\!i_4)$, the unique channel label
+$c = c(i_1 i_2 i_3 i_4)\in\{0,1,2\}$ selected by FMC, and a
+complex coupling $g_q$.  The channel determines a \emph{conjugation mask}
+$m_c \in \{0,1\}^4$ specifying which of the four slots carry a complex
+conjugation:
+\begin{equation}\label{eq:conj}
+  m_0 = (0,0,1,1)\,,\qquad
+  m_1 = (0,1,1,0)\,,\qquad
+  m_2 = (0,1,0,1)\,.
+\end{equation}
+We define the channel-dependent factor for slot $p$ as
+\begin{equation}\label{eq:tilde}
+  \tilde a_p^{(c)} \;\equiv\;
+    \begin{cases}
+      a_{i_p}^{\phantom{*}} & \text{if } (m_c)_p = 0\,,\\[2pt]
+      a_{i_p}^{*}           & \text{if } (m_c)_p = 1\,,
+    \end{cases}
+\end{equation}
+so that the contribution of quartet $q$ to $H_4$ reads
+\begin{equation}\label{eq:H4q}
+  h_q = -\Re\!\Bigl[
+    g_q \;\tilde a_1^{(c)}\,\tilde a_2^{(c)}\,
+          \tilde a_3^{(c)}\,\tilde a_4^{(c)}
+  \Bigr]\,.
+\end{equation}
+
+For each sparse entry $q$ we check whether the modified indices $i$ or $j$
+(or both) appear among $\{i_1,i_2,i_3,i_4\}$.  If neither appears, the
+entry does not contribute to $\Delta E_4$.  Two sub-cases arise.
+
+\paragraph{Case~1: exactly one of $i,j$ appears in the quartet.}
+Suppose, without loss of generality, that it is spin $i$ at slot position
+$p_0$, and define $\delta_i = a_i' - a_i^{\mathrm{old}}$.  Because
+$H_4 \ni -\Re[g_q\,\prod_p \tilde a_p]$ is linear in each slot, the
+change due to replacing $a_i\to a_i + \delta_i$ in slot $p_0$ is
+\begin{equation}\label{eq:dE4_one}
+  \Delta h_q^{(\mathrm{one})} = -\Re\!\Biggl[
+    g_q \prod_{p=1}^{4} \tilde b_p^{(c)}
+  \Biggr]\,,\qquad
+  \tilde b_p^{(c)} =
+    \begin{cases}
+      \widetilde{\delta_i}^{(c)} & \text{if } p = p_0\,,\\[2pt]
+      \tilde a_p^{(c)}           & \text{otherwise}\,,
+    \end{cases}
+\end{equation}
+where $\widetilde{\delta_i}^{(c)}$ carries the same conjugation as
+slot $p_0$:
+$\widetilde{\delta_i}^{(c)} = \delta_i$ if $(m_c)_{p_0}=0$,
+$\widetilde{\delta_i}^{(c)} = \delta_i^*$ if $(m_c)_{p_0}=1$.
+Note that this expression is \emph{exact} (not a linearisation), because
+$\delta_i$ appears in exactly one slot.
+
+\paragraph{Case~2: both $i$ and $j$ appear in the quartet.}
+When both modified spins participate, the cross-term between $\delta_i$ and
+$\delta_j$ prevents a simple factorisation.  In this case we recompute the
+full product before and after the move:
+\begin{equation}\label{eq:dE4_both}
+  \Delta h_q^{(\mathrm{both})} = -\Re\!\Biggl[
+    g_q\!\Biggl(
+      \prod_{p=1}^{4} \tilde a_p^{\prime(c)}
+    - \prod_{p=1}^{4} \tilde a_p^{(c)}
+    \Biggr)
+  \Biggr]\,,
+\end{equation}
+where $\tilde a_p^{\prime(c)}$ denotes the factor~\eqref{eq:tilde} evaluated
+with $a_i \to a_i'$ and $a_j \to a_j'$.
+
+\paragraph{Total $\Delta E_4$.}
+Summing over all sparse entries,
+\begin{equation}\label{eq:dE4_total}
+  \Delta E_4 = \sum_{q=1}^{n_{\mathrm{quartets}}} \Delta h_q \,,\qquad
+  \Delta h_q =
+    \begin{cases}
+      0                              & \text{if } i,j \notin \{i_1,i_2,i_3,i_4\}\,,\\
+      \Delta h_q^{(\mathrm{one})}    & \text{if exactly one of } i,j \in \{i_1,i_2,i_3,i_4\}\,,\\
+      \Delta h_q^{(\mathrm{both})}   & \text{if both } i,j \in \{i_1,i_2,i_3,i_4\}\,.
+    \end{cases}
+\end{equation}
+The total cost per step is $O(n_{\mathrm{quartets}})$ where
+$n_{\mathrm{quartets}} = N$ in the sparse variant, giving an $O(N)$ cost
+per MC step and $O(N^2)$ per sweep.
+
+%% ============================================================
+\section{Sweep structure and parallelism}
+%% ============================================================
+
+One MC sweep performs $\lfloor N/2\rfloor$ sequential pair-rotation steps
+(sequential because each step may modify spins that appear in subsequent
+proposals).  On GPU, the energy-difference computation for each step is
+parallelised across CUDA threads within a single block:
+\begin{itemize}
+  \item Spins are loaded into shared memory at the start of the sweep.
+  \item Thread~0 selects the pair and generates the proposal.
+  \item All threads cooperatively compute $\Delta E$ via parallel reduction
+    (warp-shuffle followed by a final warp-level sum).
+  \item Thread~0 performs the Metropolis test and, if accepted, updates the
+    shared-memory copy of the two spins.
+\end{itemize}
+Each CUDA block handles one replica; in a parallel-tempering run, all
+replicas execute their sweeps simultaneously.
+
+%% ============================================================
+\section{Summary}
+%% ============================================================
+
+The pair-rotation move on the smoothed-cube manifold $\sum\abs{a_k}^4=N$ is
+a Metropolis update that:
+\begin{enumerate}
+  \item Picks a random pair $(i,j)$.
+  \item Conserves the pairwise invariant
+        $\Sfour = \abs{a_i}^4+\abs{a_j}^4$.
+  \item Proposes new moduli and phases by sampling $(u,\varphi_1,\varphi_2)$
+        uniformly in $[0,1]\times[0,2\pi)^2$, where $u=\abs{a_j}^4/\Sfour$.
+  \item Accepts with probability $\min(1,e^{-\beta\Delta E})$,
+        with no Jacobian correction required.
+\end{enumerate}
+The $u$-parametrisation ensures that the flat measure on the constraint
+surface is exactly reproduced by the uniform proposal, guaranteeing detailed
+balance without any Jacobian factor in the acceptance ratio.
+
+\end{document}

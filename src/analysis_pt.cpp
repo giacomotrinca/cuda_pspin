@@ -718,7 +718,7 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-nbins <nbins>] [-nbins_spec <B>] [-nthreads <t>] [--sparse] [--plot] [--log-temp]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-nbins <nbins>] [-nbins_spec <B>] [-nthreads <t>] [--sparse] [--plot] [--log-temp] [--deeper]\n", prog);
     exit(1);
 }
 
@@ -727,6 +727,7 @@ int main(int argc, char** argv) {
     bool do_plot = false;
     bool sparse = false;
     bool log_temp = false;
+    bool do_deeper = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-N") == 0 && i + 1 < argc)
@@ -747,6 +748,8 @@ int main(int argc, char** argv) {
             do_plot = true;
         else if (strcmp(argv[i], "--log-temp") == 0)
             log_temp = true;
+        else if (strcmp(argv[i], "--deeper") == 0)
+            do_deeper = true;
         else usage(argv[0]);
     }
     const char* prefix = sparse ? "PTS" : "PT";
@@ -1839,6 +1842,11 @@ int main(int argc, char** argv) {
     }
 
     // ================================================================
+    // DEEPER analysis block (run only with --deeper)
+    // ================================================================
+    if (do_deeper) {
+
+    // ================================================================
     // P(|a|^2) marginal, IPR Y2/Y4, Phase overlap, Link overlap, Scatter
     // ================================================================
     if (nrep > 1) {
@@ -2554,6 +2562,8 @@ int main(int argc, char** argv) {
         printf("  Written V(q) files\n");
     }
 
+    } // end do_deeper (first block)
+
     // ================================================================
     // Autocorrelation C(tau) from configs
     // C(tau) = (1/N) sum_k Re(a*_k(t) a_k(t+tau)) averaged over t
@@ -2761,6 +2771,8 @@ int main(int argc, char** argv) {
             printf("  Written %s\n", fname);
         }
     }
+
+    if (do_deeper) { // second deeper block
 
     // ================================================================
     // Mode-mode correlation matrix C_ij eigenvalue spectrum
@@ -3620,6 +3632,11 @@ int main(int argc, char** argv) {
         printf("  Written multi-overlap scatter files\n");
     }
 
+    } // end do_deeper (second block)
+
+    if (!do_deeper)
+        printf("\n── Skipping deeper analysis (use --deeper to enable) ──\n");
+
     // ================================================================
     // Plotting (if --plot)
     // ================================================================
@@ -4341,6 +4358,7 @@ int main(int argc, char** argv) {
             }
             double Tlo = blocks.back()[0].T, Thi = blocks.front()[0].T;
             setup_colorbar_plot(plot, Tlo, Thi, log_temp);
+            int ndrawn = 0;
             for (auto& bl : blocks) {
                 std::vector<double> vx, vy;
                 for (auto& r : bl) {
@@ -4350,7 +4368,9 @@ int main(int argc, char** argv) {
                 if (vx.empty()) continue;
                 char pc[64]; snprintf(pc, sizeof(pc), "palette cb %.8f", bl[0].T);
                 plot.drawCurve(vx, vy).lineColor(pc).lineWidth(2).label("");
+                ndrawn++;
             }
+            if (ndrawn == 0) return;
             Figure fig = {{plot}};
             Canvas canvas = {{fig}};
             canvas.size(1000, 700);

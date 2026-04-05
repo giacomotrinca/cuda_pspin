@@ -488,7 +488,7 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
 
     // Collect non-zero entry indices as (q, ch) pairs encoded as q*3+ch
     // Each active (quartet, channel) pair is a potential sparse entry.
-    long long nq_tot = n_g4_total(N);  // 3 * C(N,4) — max possible
+    long long nq_tot = n_g4_total(N);  // C(N,4) — max possible (1 channel per quartet)
     long long* nonzero_idx = new long long[nq_tot];
     long long n_nonzero = 0;
     for (long long q = 0; q < nq; q++) {

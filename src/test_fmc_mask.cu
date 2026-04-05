@@ -92,21 +92,21 @@ int main(int argc, char** argv) {
     uint8_t* h_mask_gpu = new uint8_t[nq];
     CUDA_CHECK(cudaMemcpy(h_mask_gpu, d_mask, nq * sizeof(uint8_t), cudaMemcpyDeviceToHost));
 
-    // Compute CPU reference
+    // Compute CPU reference (single channel: first-pass-wins)
     uint8_t* h_mask_cpu = new uint8_t[nq];
     for (long long q = 0; q < nq; q++) {
         int ii, jj, kk, ll;
         decode_quartet(q, &ii, &jj, &kk, &ll);
-        uint8_t m = 0x7;  // all 3 channels active
+        uint8_t m = 0;
         // ch 0: |ω_ii + ω_jj - ω_kk - ω_ll|
-        if (fabs(h_omega[ii] + h_omega[jj] - h_omega[kk] - h_omega[ll]) > gamma)
-            m &= ~(1u << 0);
+        if (fabs(h_omega[ii] + h_omega[jj] - h_omega[kk] - h_omega[ll]) <= gamma)
+            m = (1u << 0);
         // ch 1: |ω_ii + ω_ll - ω_jj - ω_kk|
-        if (fabs(h_omega[ii] + h_omega[ll] - h_omega[jj] - h_omega[kk]) > gamma)
-            m &= ~(1u << 1);
+        else if (fabs(h_omega[ii] + h_omega[ll] - h_omega[jj] - h_omega[kk]) <= gamma)
+            m = (1u << 1);
         // ch 2: |ω_ii + ω_kk - ω_jj - ω_ll|
-        if (fabs(h_omega[ii] + h_omega[kk] - h_omega[jj] - h_omega[ll]) > gamma)
-            m &= ~(1u << 2);
+        else if (fabs(h_omega[ii] + h_omega[kk] - h_omega[jj] - h_omega[ll]) <= gamma)
+            m = (1u << 2);
         h_mask_cpu[q] = m;
     }
 

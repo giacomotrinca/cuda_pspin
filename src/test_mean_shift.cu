@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMalloc(&d_g4, nq * sizeof(cuDoubleComplex)));
         generate_g4(d_g4, N, J, 42);
 
-        // Fully-connected: all quartets active with 3 channels
+        // Fully-connected: all quartets active with 1 channel each
         long long n_surviving = n_g4_total(N);
 
         rescale_g4(d_g4, N, J, n_surviving);

@@ -13,4 +13,5 @@ data/
 *.pdf
 .vscode/
 include/sciplot/
+notes/exp_N18_NR100/
 README.md
