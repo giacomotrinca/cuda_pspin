@@ -3389,9 +3389,9 @@ int main(int argc, char** argv) {
     if (nrep > 1) {
         printf("\n── Binder g4 crossing analysis ─────────────────────\n");
 
-        // Read glass_obs.dat to get g4 vs T
+        // Read parisi_glass_observables.dat to get g4 vs T
         char gofile[512];
-        snprintf(gofile, sizeof(gofile), "%s/glass_obs.dat", outdir);
+        snprintf(gofile, sizeof(gofile), "%s/parisi_glass_observables.dat", outdir);
         FILE* fin = fopen(gofile, "r");
         if (fin) {
             std::vector<double> Tg, g4v;
@@ -3436,7 +3436,7 @@ int main(int argc, char** argv) {
                 }
             }
         } else {
-            printf("  glass_obs.dat not found — run overlap analysis first\n");
+            printf("  parisi_glass_observables.dat not found — run overlap analysis first\n");
         }
     }
 
@@ -3447,8 +3447,16 @@ int main(int argc, char** argv) {
         printf("\n── Multi-overlap scatter (threads=%d) ──────────────\n", nthreads);
 
         struct MultiOvlPt { double q, q_phi, ifo; };
+        int max_pts = 5000;
         std::vector<std::vector<MultiOvlPt>> pts_per_ti(ntemps);
+        std::vector<int> pts_total(ntemps, 0);
+        std::vector<std::mt19937> rng_pts;
+        for (int ti = 0; ti < ntemps; ti++) {
+            pts_per_ti[ti].reserve(max_pts);
+            rng_pts.emplace_back(42 + ti);
+        }
         std::vector<std::mutex> mtx_pts(ntemps);
+        int max_iters_scatter = 512;
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
@@ -3456,6 +3464,17 @@ int main(int argc, char** argv) {
                      prefix, N, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
+
+            // Pre-build iter→index map (O(1) lookup instead of O(nsnap) find_entry)
+            std::vector<std::vector<std::unordered_map<int,int>>> iter_map(
+                cstore.NT, std::vector<std::unordered_map<int,int>>(nrep));
+            for (int t = 0; t < cstore.NT; t++)
+                for (int r = 0; r < nrep; r++) {
+                    auto& ev = cstore.entries[t][r];
+                    iter_map[t][r].reserve(ev.size());
+                    for (int idx = 0; idx < (int)ev.size(); idx++)
+                        iter_map[t][r][ev[idx].iter] = idx;
+                }
 
             std::atomic<int> ti_next(0);
             auto worker = [&](int /*id*/) {
@@ -3478,29 +3497,48 @@ int main(int argc, char** argv) {
                     std::vector<int> c_iters(common.begin(), common.end());
                     if (c_iters.empty()) continue;
 
+                    // Subsample iterations to limit compute
+                    if ((int)c_iters.size() > max_iters_scatter) {
+                        std::mt19937 rng_sub(42 + s * ntemps + ti);
+                        std::shuffle(c_iters.begin(), c_iters.end(), rng_sub);
+                        c_iters.resize(max_iters_scatter);
+                    }
+                    int nit = (int)c_iters.size();
+
+                    // Gather data pointers for all (rep, iter) via hash map — O(1) each
+                    std::vector<std::vector<const double*>> dptrs(nrep);
+                    for (int r = 0; r < nrep; r++) {
+                        dptrs[r].resize(nit, nullptr);
+                        for (int j = 0; j < nit; j++) {
+                            auto mit = iter_map[tidx][r].find(c_iters[j]);
+                            if (mit != iter_map[tidx][r].end())
+                                dptrs[r][j] = cstore.entries[tidx][r][mit->second].data.data();
+                        }
+                    }
+
+                    // Pre-compute mean intensity per replica per mode (once, not per-pair)
+                    std::vector<std::vector<double>> meanI(nrep, std::vector<double>(N, 0.0));
+                    for (int r = 0; r < nrep; r++) {
+                        int cnt = 0;
+                        for (int j = 0; j < nit; j++) {
+                            if (!dptrs[r][j]) continue;
+                            const double* d = dptrs[r][j];
+                            for (int k = 0; k < N; k++)
+                                meanI[r][k] += d[2*k]*d[2*k] + d[2*k+1]*d[2*k+1];
+                            cnt++;
+                        }
+                        if (cnt > 0)
+                            for (int k = 0; k < N; k++) meanI[r][k] /= cnt;
+                    }
+
                     std::vector<MultiOvlPt> local_pts;
 
                     for (int ra = 0; ra < nrep; ra++)
                         for (int rb = ra + 1; rb < nrep; rb++) {
-                            std::vector<double> meanIa(N,0), meanIb(N,0);
-                            int nit = (int)c_iters.size();
-                            for (int it : c_iters) {
-                                auto* ea = cstore.find_entry(tidx, ra, it);
-                                auto* eb = cstore.find_entry(tidx, rb, it);
-                                if (!ea || !eb) continue;
-                                for (int k = 0; k < N; k++) {
-                                    double ra_ = ea->data[2*k], ia_ = ea->data[2*k+1];
-                                    double rb_ = eb->data[2*k], ib_ = eb->data[2*k+1];
-                                    meanIa[k] += ra_*ra_ + ia_*ia_;
-                                    meanIb[k] += rb_*rb_ + ib_*ib_;
-                                }
-                            }
-                            for (int k = 0; k < N; k++) { meanIa[k] /= nit; meanIb[k] /= nit; }
-
-                            for (int it : c_iters) {
-                                auto* ea = cstore.find_entry(tidx, ra, it);
-                                auto* eb = cstore.find_entry(tidx, rb, it);
-                                if (!ea || !eb) continue;
+                            for (int j = 0; j < nit; j++) {
+                                const double* da = dptrs[ra][j];
+                                const double* db = dptrs[rb][j];
+                                if (!da || !db) continue;
 
                                 double num_q = 0, n1q = 0, n2q = 0;
                                 double num_qp = 0;
@@ -3508,8 +3546,8 @@ int main(int argc, char** argv) {
                                 double num_ifo = 0, d1_ifo = 0, d2_ifo = 0;
 
                                 for (int k = 0; k < N; k++) {
-                                    double ra_ = ea->data[2*k], ia_ = ea->data[2*k+1];
-                                    double rb_ = eb->data[2*k], ib_ = eb->data[2*k+1];
+                                    double ra_ = da[2*k], ia_ = da[2*k+1];
+                                    double rb_ = db[2*k], ib_ = db[2*k+1];
                                     double Ia = ra_*ra_ + ia_*ia_;
                                     double Ib = rb_*rb_ + ib_*ib_;
 
@@ -3522,8 +3560,8 @@ int main(int argc, char** argv) {
                                         cnt_qp++;
                                     }
 
-                                    double dIa = Ia - meanIa[k];
-                                    double dIb = Ib - meanIb[k];
+                                    double dIa = Ia - meanI[ra][k];
+                                    double dIb = Ib - meanI[rb][k];
                                     num_ifo += dIa * dIb;
                                     d1_ifo += dIa * dIa;
                                     d2_ifo += dIb * dIb;
@@ -3539,10 +3577,19 @@ int main(int argc, char** argv) {
                             }
                         }
 
+                    // Reservoir sampling into global pts_per_ti[ti]
                     if (!local_pts.empty()) {
                         std::lock_guard<std::mutex> lk(mtx_pts[ti]);
-                        pts_per_ti[ti].insert(pts_per_ti[ti].end(),
-                                              local_pts.begin(), local_pts.end());
+                        for (auto& p : local_pts) {
+                            pts_total[ti]++;
+                            if ((int)pts_per_ti[ti].size() < max_pts) {
+                                pts_per_ti[ti].push_back(p);
+                            } else {
+                                std::uniform_int_distribution<int> dist(0, pts_total[ti] - 1);
+                                int j = dist(rng_pts[ti]);
+                                if (j < max_pts) pts_per_ti[ti][j] = p;
+                            }
+                        }
                     }
                 }
             };
@@ -3558,17 +3605,6 @@ int main(int argc, char** argv) {
         for (int ti = 0; ti < ntemps; ti++) {
             auto& pts = pts_per_ti[ti];
             if (pts.empty()) continue;
-
-            // Downsample
-            int max_pts = 5000;
-            if ((int)pts.size() > max_pts) {
-                std::mt19937 rng(42 + ti);
-                for (int i = 0; i < max_pts; i++) {
-                    std::uniform_int_distribution<int> dist(i, (int)pts.size() - 1);
-                    std::swap(pts[i], pts[dist(rng)]);
-                }
-                pts.resize(max_pts);
-            }
 
             char fname[512];
             snprintf(fname, sizeof(fname), "%s/multi_overlap_T%.4f.dat", outdir, temps[ti]);
