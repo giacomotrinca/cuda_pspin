@@ -11,6 +11,10 @@ SPARSE=0
 COMPRESS=0
 LOG_TEMP=0
 DEEPER=0
+J=2.0
+R="inf"
+ALPHA=0.5
+ALPHA0=0.5
 
 for arg in "$@"; do
     case "$arg" in
@@ -19,6 +23,10 @@ for arg in "$@"; do
         --nrep=*)     NREP="${arg#*=}" ;;
         --nbins=*)    NBINS="${arg#*=}" ;;
         --nthreads=*) NTHREADS="${arg#*=}" ;;
+        --J=*)        J="${arg#*=}" ;;
+        --R=*)        R="${arg#*=}" ;;
+        --alpha=*)    ALPHA="${arg#*=}" ;;
+        --alpha0=*)   ALPHA0="${arg#*=}" ;;
         --sparse)     SPARSE=1 ;;
         --log-temp)   LOG_TEMP=1 ;;
         --deeper)     DEEPER=1 ;;
@@ -30,6 +38,10 @@ for arg in "$@"; do
             echo "  --nrep=R      Number of replicas per temperature (default: $NREP)"
             echo "  --nbins=B     Number of bins for overlap histogram (default: $NBINS)"
             echo "  --nthreads=T  Threads for overlap computation (default: $(nproc))"
+            echo "  --J=J         Total coupling scale (default: $J)"
+            echo "  --R=R         Ratio J/J0, 'inf' for pure disorder (default: $R)"
+            echo "  --alpha=A     4-body fraction of J (default: $ALPHA)"
+            echo "  --alpha0=A0   4-body fraction of J0 (default: $ALPHA0)"
             echo "  --sparse      Analyze sparse (PTS) data instead of standard (PT)"
             echo "  --log-temp    Use log scale for temperature axes and colorbars"
             echo "  --deeper      Enable deeper analysis (ultrametricity, scatter, etc.)"
@@ -43,15 +55,34 @@ for arg in "$@"; do
     esac
 done
 
+# Compute J0 from R = J/J0
+if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
+    J0=0.0
+else
+    J0=$(awk "BEGIN {printf \"%.6g\", $J / $R}")
+fi
+
+# Format float for directory names (matches C fmt_param)
+fmt_param() { awk "BEGIN { s=sprintf(\"%.6g\", $1); if (index(s,\".\")==0 && index(s,\"e\")==0) s=s\".0\"; print s }"; }
+ALPHA_TAG=$(echo "$ALPHA" | fmt_param)
+ALPHA0_TAG=$(echo "$ALPHA0" | fmt_param)
+if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
+    R_TAG="inf"
+else
+    R_TAG=$(awk "BEGIN {printf \"%.6g\", $J / $J0}" | fmt_param)
+fi
+
 if [ "$SPARSE" -eq 1 ]; then
     PREFIX="PTS"
 else
     PREFIX="PT"
 fi
 
+DIR_STEM="${PREFIX}_N${SIZE}_a${ALPHA_TAG}_R${R_TAG}_a0${ALPHA0_TAG}_NT${NT}_NR${NREP}"
+
 # Decompress .xz files in data directories if --compress
 if [ "$COMPRESS" -eq 1 ]; then
-    for d in data/${PREFIX}_N${SIZE}_NT${NT}_NR${NREP}_S*/; do
+    for d in data/${DIR_STEM}_S*/; do
         [ -d "$d" ] || continue
         xzcount=$(find "$d" -name '*.xz' 2>/dev/null | head -1)
         if [ -n "$xzcount" ]; then
@@ -61,7 +92,7 @@ if [ "$COMPRESS" -eq 1 ]; then
     done
 fi
 
-CMD="./bin/analysis_pt -N $SIZE -NT $NT -nrep $NREP -nbins $NBINS -nthreads $NTHREADS --plot"
+CMD="./bin/analysis_pt -N $SIZE -NT $NT -nrep $NREP -alpha $ALPHA -J $J -J0 $J0 -alpha0 $ALPHA0 -nbins $NBINS -nthreads $NTHREADS --plot"
 if [ "$SPARSE" -eq 1 ]; then
     CMD="$CMD --sparse"
 fi
@@ -75,7 +106,7 @@ $CMD
 
 # Re-compress if --compress
 if [ "$COMPRESS" -eq 1 ]; then
-    for d in data/${PREFIX}_N${SIZE}_NT${NT}_NR${NREP}_S*/; do
+    for d in data/${DIR_STEM}_S*/; do
         [ -d "$d" ] || continue
         echo "  Re-compressing $d ..."
         find "$d" \( -name '*.bin' -o -name '*.txt' \) ! -name '*.xz' -exec xz -9 {} +

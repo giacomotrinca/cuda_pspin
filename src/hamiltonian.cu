@@ -19,7 +19,7 @@
 // ============================================================================
 
 // Kernel: compute H2 partial sums
-// H2 = -sum_{i<j} Re[ g2_ij * a_i * conj(a_j) ]
+// H2 = -sum_{i<=j} Re[ g2_ij * a_i * conj(a_j) ]  (includes diagonal i=j)
 __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
                                   const cuDoubleComplex* g2,
                                   int N, double* partial_sums) {
@@ -27,15 +27,15 @@ __global__ void energy_h2_kernel(const cuDoubleComplex* spins,
     int tid = threadIdx.x;
     int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    long long total_pairs = (long long)N * (N - 1) / 2;
+    long long total_pairs = (long long)N * (N + 1) / 2;
     double local_sum = 0.0;
 
     if (pair_idx < total_pairs) {
-        // Map linear index to (i,j) with i < j
-        // Using the inverse triangular number formula
-        int j = (int)(0.5 + sqrt(0.25 + 2.0 * pair_idx));
-        int i = pair_idx - (long long)j * (j - 1) / 2;
-        if (i >= j) { j++; i = pair_idx - (long long)j * (j - 1) / 2; }
+        // Map linear index to (i,j) with i <= j
+        // T(j) = j*(j+1)/2 pairs up to row j
+        int j = (int)floor(sqrt(2.0 * pair_idx + 0.25) - 0.5);
+        int i = pair_idx - (long long)j * (j + 1) / 2;
+        if (i > j) { j++; i = pair_idx - (long long)j * (j + 1) / 2; }
 
         cuDoubleComplex gij = g2[i * N + j];
         cuDoubleComplex ai = spins[i];
@@ -222,7 +222,7 @@ __global__ void delta_e_h2_kernel(
         cuDoubleComplex a_i_old = spins[i0];
         cuDoubleComplex a_j_old = spins[j0];
 
-        // Terms involving i0: g2[i0,k] or g2[k,i0]
+        // Off-diagonal terms involving i0 or j0 (k != i0 and k != j0)
         if (k != i0 && k != j0) {
             cuDoubleComplex gik = g2[i0 * N + k];
 
@@ -235,6 +235,22 @@ __global__ void delta_e_h2_kernel(
 
             old_prod = cuCmul(gjk, cuCmul(a_j_old, cuConj(a_k)));
             new_prod = cuCmul(gjk, cuCmul(a_j_new, cuConj(a_k)));
+            local_dE += -(cuCreal(new_prod) - cuCreal(old_prod));
+        }
+
+        // Diagonal term (i0, i0): g2_ii * |a_i|^2
+        if (k == i0) {
+            cuDoubleComplex gii = g2[i0 * N + i0];
+            cuDoubleComplex old_prod = cuCmul(gii, cuCmul(a_i_old, cuConj(a_i_old)));
+            cuDoubleComplex new_prod = cuCmul(gii, cuCmul(a_i_new, cuConj(a_i_new)));
+            local_dE += -(cuCreal(new_prod) - cuCreal(old_prod));
+        }
+
+        // Diagonal term (j0, j0): g2_jj * |a_j|^2
+        if (k == j0) {
+            cuDoubleComplex gjj = g2[j0 * N + j0];
+            cuDoubleComplex old_prod = cuCmul(gjj, cuCmul(a_j_old, cuConj(a_j_old)));
+            cuDoubleComplex new_prod = cuCmul(gjj, cuCmul(a_j_new, cuConj(a_j_new)));
             local_dE += -(cuCreal(new_prod) - cuCreal(old_prod));
         }
 

@@ -42,17 +42,16 @@ __global__ void zero_imag_kernel(cuDoubleComplex* couplings, long long n) {
     }
 }
 
-// Kernel to symmetrize g2: copy upper triangle to lower, zero diagonal
+// Kernel to symmetrize g2: copy upper triangle to lower, keep diagonal
 __global__ void symmetrize_g2_kernel(cuDoubleComplex* g2, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * N) return;
     int i = idx / N;
     int j = idx % N;
-    if (i == j) {
-        g2[idx] = make_cuDoubleComplex(0.0, 0.0);
-    } else if (i > j) {
+    if (i > j) {
         g2[i * N + j] = g2[j * N + i];
     }
+    // diagonal (i == j) keeps its generated value
 }
 
 void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed) {

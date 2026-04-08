@@ -112,10 +112,32 @@ int main(int argc, char** argv) {
     // --- Output directories ---
     int label = (cfg.label >= 0) ? cfg.label : 0;
     char datadir[256];
-    snprintf(datadir, sizeof(datadir), "data/PTS_N%d_NT%d_NR%d_S%d",
-             cfg.N, NT, nrep_per_temp, label);
+    make_run_dir(datadir, sizeof(datadir), "data", "PTS",
+                 cfg.N, cfg.alpha, cfg.J, cfg.J0, cfg.alpha0, NT, nrep_per_temp, label);
     mkdir("data", 0755);
     mkdir(datadir, 0755);
+
+    // --- Write params.txt ---
+    {
+        char pfile[256];
+        snprintf(pfile, sizeof(pfile), "%s/params.txt", datadir);
+        FILE* fp = fopen(pfile, "w");
+        if (fp) {
+            fprintf(fp, "N %d\n", cfg.N);
+            fprintf(fp, "J %.10g\n", cfg.J);
+            fprintf(fp, "J0 %.10g\n", cfg.J0);
+            fprintf(fp, "alpha %.10g\n", cfg.alpha);
+            fprintf(fp, "alpha0 %.10g\n", cfg.alpha0);
+            fprintf(fp, "NT %d\n", NT);
+            fprintf(fp, "nrep %d\n", nrep_per_temp);
+            fprintf(fp, "label %d\n", label);
+            fprintf(fp, "seed %lu\n", cfg.seed);
+            fprintf(fp, "nsweeps %d\n", cfg.mc_iterations);
+            fprintf(fp, "Tmin %.10g\n", Tmin);
+            fprintf(fp, "Tmax %.10g\n", Tmax);
+            fclose(fp);
+        }
+    }
 
     // --- Output files ---
     char efile[256], xfile[256];

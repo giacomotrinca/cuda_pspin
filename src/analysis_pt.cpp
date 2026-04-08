@@ -1,18 +1,9 @@
 // Analysis of parallel tempering data.
 //
-// Reads energy_accept.txt and exchanges.txt from data/PT_N{N}_NT{NT}_NR{nrep}_S{0,1,...}.
-// For each temperature, uses the second half of the time series to compute
-// mean energy, acceptance, and specific heat (jackknife errors over samples).
-//
-// Output directory: analysis/PT_N{N}_NT{NT}_NR{nrep}/
-//   equilibrium_data_nr{r}.dat  — per-replica results
-//   equilibrium_data_mean.dat   — replica-averaged results
-//   exchange_rates.dat          — exchange acceptance rates between adjacent temperatures
-//
-// Columns (equilibrium_data):
-//   Temperature  Energy_mean  Energy_err_jk  Acceptance_mean  Acceptance_err_jk  Cv  Cv_err_jk
-//
-// Specific heat: Cv = N * (<e^2> - <e>^2) / T^2,  e = E/N.
+// Reads energy_accept.txt and exchanges.txt from
+//   data/{prefix}_N{N}_a{alpha}_R{R}_a0{alpha0}_NT{NT}_NR{nrep}_S{0,1,...}.
+// Output directory:
+//   analysis/{prefix}_N{N}_a{alpha}_R{R}_a0{alpha0}_NT{NT}_NR{nrep}/
 
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +21,7 @@
 #include <mutex>
 #include <sys/stat.h>
 #include <dirent.h>
+#include "../include/config.h"
 #include <sciplot/sciplot.hpp>
 
 // Color interpolation for temperature gradient (cool blue → warm red)
@@ -150,17 +142,20 @@ static std::vector<MomRow> write_moments(
 static void setup_analysis_plot(sciplot::Plot2D& plot) {
     plot.fontName("Helvetica");
     plot.fontSize(15);
-    plot.gnuplot("set border 3 lw 1.4 lc rgb '#2D2D2D'");
-    plot.gnuplot("set style line 100 lt 1 lc rgb '#E8E8E8' lw 0.6");
+    plot.gnuplot("set border 3 front lw 1.4 lc rgb '#2D2D2D'");
+    plot.gnuplot("set style line 100 lt 1 lc rgb '#E0E0E0' lw 0.5 dt '.'");
     plot.gnuplot("set grid back ls 100");
-    plot.gnuplot("set tics nomirror out scale 0.6");
-    plot.gnuplot("set tics font 'Helvetica,12'");
-    plot.gnuplot("set lmargin 12");
-    plot.gnuplot("set rmargin 4");
-    plot.gnuplot("set tmargin 2");
-    plot.gnuplot("set bmargin 4.5");
-    plot.gnuplot("set key opaque box lc rgb '#CCCCCC' lw 0.5");
-    plot.gnuplot("set key spacing 1.3");
+    plot.gnuplot("set tics nomirror out scale 0.5");
+    plot.gnuplot("set tics font 'Helvetica,13'");
+    plot.gnuplot("set xlabel font 'Helvetica,15'");
+    plot.gnuplot("set ylabel font 'Helvetica,15'");
+    plot.gnuplot("set lmargin 11");
+    plot.gnuplot("set rmargin 3");
+    plot.gnuplot("set tmargin 1.5");
+    plot.gnuplot("set bmargin 4");
+    plot.gnuplot("set key opaque box lc rgb '#E0E0E0' lw 0.4");
+    plot.gnuplot("set key spacing 1.4");
+    plot.gnuplot("set key samplen 2.5");
 }
 
 // Setup for plots with a temperature colorbar on the right
@@ -174,8 +169,8 @@ static void setup_colorbar_plot(sciplot::Plot2D& plot,
     snprintf(cbr, sizeof(cbr), "set cbrange [%g:%g]", Tmin, Tmax);
     plot.gnuplot(cbr);
     if (log_cb) plot.gnuplot("set log cb");
-    plot.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,13' offset 1,0");
-    plot.gnuplot("set cbtics font 'Helvetica,11'");
+    plot.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,14' offset 1,0");
+    plot.gnuplot("set cbtics font 'Helvetica,12' scale 0.4");
     plot.gnuplot("set colorbox vertical user origin 0.88, 0.15 size 0.025, 0.7");
 }
 
@@ -656,23 +651,33 @@ static std::vector<ExSweepBlock> read_exchange_sweep_data(const char* datadir) {
     return blocks;
 }
 
-// Find all sample directories matching data/{prefix}_N{N}_NT{NT}_NR{nrep}_S*
-static std::vector<int> find_samples(int N, int NT, int nrep, const char* prefix) {
+// Find all sample directories matching the parameter-aware naming convention
+static std::vector<int> find_samples(int N, int NT, int nrep, const char* prefix,
+                                     double alpha, double J, double J0, double alpha0) {
     std::vector<int> labels;
     DIR* dir = opendir("data");
     if (!dir) return labels;
 
-    char pat[128];
-    snprintf(pat, sizeof(pat), "%s_N%d_NT%d_NR%d_S", prefix, N, NT, nrep);
-    int plen = (int)strlen(pat);
+    // Build the expected prefix (everything before _S{label})
+    char ref[256];
+    make_run_dir(ref, sizeof(ref), "", prefix, N, alpha, J, J0, alpha0, NT, nrep, 0);
+    // ref = "/PT_N18_a0.5_Rinf_a00.5_NT30_NR16_S0"  —  strip leading '/' and trailing _S0
+    char* base = ref + 1;  // skip leading '/'
+    // Find last "_S" to get prefix
+    char* lastsep = strrchr(base, 'S');
+    if (lastsep && lastsep > base && *(lastsep-1) == '_')
+        *(lastsep - 1) = '\0';  // truncate at _S
+
+    int plen = (int)strlen(base);
 
     struct dirent* ent;
     while ((ent = readdir(dir)) != nullptr) {
-        if (strncmp(ent->d_name, pat, plen) == 0) {
-            int label = atoi(ent->d_name + plen);
-            char check[128];
-            snprintf(check, sizeof(check), "%s_N%d_NT%d_NR%d_S%d", prefix, N, NT, nrep, label);
-            if (strcmp(ent->d_name, check) == 0)
+        if (strncmp(ent->d_name, base, plen) == 0 && ent->d_name[plen] == '_' && ent->d_name[plen+1] == 'S') {
+            int label = atoi(ent->d_name + plen + 2);
+            // Verify exact match
+            char check[256];
+            make_run_dir(check, sizeof(check), "", prefix, N, alpha, J, J0, alpha0, NT, nrep, label);
+            if (strcmp(ent->d_name, check + 1) == 0)  // +1 to skip leading '/'
                 labels.push_back(label);
         }
     }
@@ -718,12 +723,14 @@ static SampleObs compute_obs(const TempBlock& tb, int replica) {
 }
 
 static void usage(const char* prog) {
-    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-nbins <nbins>] [-nbins_spec <B>] [-nthreads <t>] [--sparse] [--plot] [--log-temp] [--deeper]\n", prog);
+    fprintf(stderr, "Usage: %s -N <N> -NT <NT> [-nrep <nrep>] [-alpha <a>] [-J0 <J0>] [-alpha0 <a0>] [-J <J>]"
+            " [-nbins <nbins>] [-nbins_spec <B>] [-nthreads <t>] [--sparse] [--plot] [--log-temp] [--deeper]\n", prog);
     exit(1);
 }
 
 int main(int argc, char** argv) {
     int N = 0, NT = 0, nrep = 1, nbins = 100, nbins_spec = 0, nthreads = 0;
+    double alpha = 0.5, J0 = 0.0, alpha0 = 0.5, J = 2.0;
     bool do_plot = false;
     bool sparse = false;
     bool log_temp = false;
@@ -736,6 +743,14 @@ int main(int argc, char** argv) {
             NT = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nrep") == 0 && i + 1 < argc)
             nrep = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-alpha") == 0 && i + 1 < argc)
+            alpha = atof(argv[++i]);
+        else if (strcmp(argv[i], "-J0") == 0 && i + 1 < argc)
+            J0 = atof(argv[++i]);
+        else if (strcmp(argv[i], "-alpha0") == 0 && i + 1 < argc)
+            alpha0 = atof(argv[++i]);
+        else if (strcmp(argv[i], "-J") == 0 && i + 1 < argc)
+            J = atof(argv[++i]);
         else if (strcmp(argv[i], "-nbins") == 0 && i + 1 < argc)
             nbins = atoi(argv[++i]);
         else if (strcmp(argv[i], "-nbins_spec") == 0 && i + 1 < argc)
@@ -759,22 +774,33 @@ int main(int argc, char** argv) {
     if (N < 4 || NT < 2) usage(argv[0]);
     if (nbins_spec <= 0) nbins_spec = nbins;
 
-    auto labels = find_samples(N, NT, nrep, prefix);
+    auto labels = find_samples(N, NT, nrep, prefix, alpha, J, J0, alpha0);
     if (labels.empty()) {
-        fprintf(stderr, "No sample directories found for data/%s_N%d_NT%d_NR%d_S*\n", prefix, N, NT, nrep);
+        char tmp[256];
+        make_run_dir(tmp, sizeof(tmp), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, 0);
+        // strip _S0 for the error message
+        char* p = strrchr(tmp, '_'); if (p) *p = '\0';
+        fprintf(stderr, "No sample directories found for %s_S*\n", tmp);
         return 1;
     }
     int nsamples = (int)labels.size();
 
     char outdir[256];
-    snprintf(outdir, sizeof(outdir), "analysis/%s_N%d_NT%d_NR%d", prefix, N, NT, nrep);
+    make_run_dir(outdir, sizeof(outdir), "analysis", prefix, N, alpha, J, J0, alpha0, NT, nrep, -1);
     mkdir_p(outdir);
+
+    char sR[32];
+    if (J0 == 0.0) snprintf(sR, sizeof(sR), "inf");
+    else { fmt_param(sR, sizeof(sR), J / J0); }
 
     printf("\n");
     printf("╔══════════════════════════════════════════════════╗\n");
     printf("║       p-Spin 2+4 :: Analysis (%s)            ║\n", prefix);
     printf("╚══════════════════════════════════════════════════╝\n");
     printf("  %-22s %d\n", "N", N);
+    printf("  %-22s %.6g\n", "alpha", alpha);
+    printf("  %-22s %s\n", "R = J/J0", sR);
+    printf("  %-22s %.6g\n", "alpha0", alpha0);
     printf("  %-22s %d\n", "NT", NT);
     printf("  %-22s %d\n", "nrep", nrep);
     printf("  %-22s %s\n", "mode", sparse ? "sparse (PTS)" : "standard (PT)");
@@ -787,7 +813,7 @@ int main(int argc, char** argv) {
     std::vector<std::vector<ExSweepBlock>> all_ex_sweep(nsamples);
     for (int s = 0; s < nsamples; s++) {
         char sdir[256];
-        snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d", prefix, N, NT, nrep, labels[s]);
+        make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
         all_data[s] = read_pt_data(sdir, nrep);
         all_ex[s] = read_exchange_data(sdir);
         all_ex_sweep[s] = read_exchange_sweep_data(sdir);
@@ -1205,8 +1231,7 @@ int main(int argc, char** argv) {
         std::vector<std::vector<double>> omega_s(nsamples);
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             omega_s[s] = read_frequencies(sdir, N);
         }
 
@@ -1217,8 +1242,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -1324,8 +1348,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -1485,8 +1508,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -1670,8 +1692,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -1872,8 +1893,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -2270,8 +2290,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
             ep_s[s].resize(ntemps, 0.0);
@@ -2473,8 +2492,7 @@ int main(int argc, char** argv) {
         std::vector<double> omega_ref;
         {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[0]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[0]);
             omega_ref = read_frequencies(sdir, N);
         }
         if (!omega_ref.empty()) {
@@ -2492,8 +2510,7 @@ int main(int argc, char** argv) {
 
                 for (int s = 0; s < nsamples; s++) {
                     char sdir[256];
-                    snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                             prefix, N, NT, nrep, labels[s]);
+                    make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
                     ConfigStore cstore;
                     cstore.load(sdir, N, NT, nrep);
                     for (int r = 0; r < nrep; r++) {
@@ -2577,8 +2594,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
             autocorr_s[s].resize(ntemps);
@@ -2794,8 +2810,7 @@ int main(int argc, char** argv) {
         // Load ConfigStore once per sample, accumulate for all 3 temperatures in parallel
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -2943,8 +2958,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -3143,8 +3157,7 @@ int main(int argc, char** argv) {
         std::vector<ConfigStore> all_configs(nsamples);
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             all_configs[s].load(sdir, N, NT, nrep);
         }
 
@@ -3232,8 +3245,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             char esfile[512];
             snprintf(esfile, sizeof(esfile), "%s/energy_split.txt", sdir);
             FILE* f = fopen(esfile, "r");
@@ -3472,8 +3484,7 @@ int main(int argc, char** argv) {
 
         for (int s = 0; s < nsamples; s++) {
             char sdir[256];
-            snprintf(sdir, sizeof(sdir), "data/%s_N%d_NT%d_NR%d_S%d",
-                     prefix, N, NT, nrep, labels[s]);
+            make_run_dir(sdir, sizeof(sdir), "data", prefix, N, alpha, J, J0, alpha0, NT, nrep, labels[s]);
             ConfigStore cstore;
             cstore.load(sdir, N, NT, nrep);
 
@@ -3748,7 +3759,7 @@ int main(int argc, char** argv) {
                             .fillColor("#4393c3").fillIntensity(0.35).fillTransparent()
                             .lineColor("#4393c3").lineWidth(0).labelNone();
                         plot.drawCurve(vT, vE)
-                            .lineColor("#2166ac").lineWidth(2).label("E/N");
+                            .lineColor("#2166ac").lineWidth(2).label("{/Helvetica-Oblique E}/{/Helvetica-Oblique N}");
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
                         canvas.size(900, 600);
@@ -3788,7 +3799,7 @@ int main(int argc, char** argv) {
                             .fillColor("#f4a582").fillIntensity(0.35).fillTransparent()
                             .lineColor("#f4a582").lineWidth(0).labelNone();
                         plot.drawCurve(vT, vCv)
-                            .lineColor("#b2182b").lineWidth(2).label("C_v");
+                            .lineColor("#b2182b").lineWidth(2).label("{/Helvetica-Oblique C}_{v}");
                         Figure fig = {{plot}};
                         Canvas canvas = {{fig}};
                         canvas.size(900, 600);
@@ -4453,7 +4464,7 @@ int main(int argc, char** argv) {
             if (any) {
                 // chi panel
                 Plot2D pChi; setup_analysis_plot(pChi);
-                pChi.gnuplot("set title '{/Helvetica-Bold Susceptibility {/Symbol c}}'");
+                pChi.gnuplot("set title '{/Helvetica-Bold Susceptibility} {/Symbol c}'");
                 pChi.gnuplot("set logscale x 10");
                 pChi.xlabel("{/Helvetica-Oblique T}");
                 pChi.ylabel("{/Symbol c}");
@@ -4473,7 +4484,7 @@ int main(int argc, char** argv) {
 
                 // g4 panel
                 Plot2D pG4; setup_analysis_plot(pG4);
-                pG4.gnuplot("set title '{/Helvetica-Bold Binder parameter g_4}'");
+                pG4.gnuplot("set title '{/Helvetica-Bold Binder parameter} {/Helvetica-Oblique g}_4'");
                 pG4.gnuplot("set logscale x 10");
                 pG4.xlabel("{/Helvetica-Oblique T}");
                 pG4.ylabel("{/Helvetica-Oblique g}_4");
@@ -4493,7 +4504,7 @@ int main(int argc, char** argv) {
 
                 // A panel
                 Plot2D pA; setup_analysis_plot(pA);
-                pA.gnuplot("set title '{/Helvetica-Bold Non-self-averaging A}'");
+                pA.gnuplot("set title '{/Helvetica-Bold Non-self-averaging} {/Helvetica-Oblique A}'");
                 pA.gnuplot("set logscale x 10");
                 pA.xlabel("{/Helvetica-Oblique T}");
                 pA.ylabel("{/Helvetica-Oblique A}({/Helvetica-Oblique T})");
@@ -4513,7 +4524,7 @@ int main(int argc, char** argv) {
 
                 // Scatter panel: q_parisi vs q_link
                 Plot2D pScat; setup_analysis_plot(pScat);
-                pScat.gnuplot("set title '{/Helvetica-Bold Scatter q vs q_{link}}'");
+                pScat.gnuplot("set title '{/Helvetica-Bold Scatter} {/Helvetica-Oblique q} {/Helvetica-Bold vs} {/Helvetica-Oblique q}_{link}'");
                 pScat.xlabel("{/Helvetica-Oblique q}_{Parisi}");
                 pScat.ylabel("{/Helvetica-Oblique q}_{link}");
                 bool has_scatter = false;
@@ -4547,7 +4558,7 @@ int main(int argc, char** argv) {
                             pScat.gnuplot(cbr);
                             pScat.gnuplot("set cblabel '{/Helvetica-Oblique T}' font 'Helvetica,13' offset 1,0");
                             pScat.gnuplot("set cbtics font 'Helvetica,11'");
-                            pScat.gnuplot("set colorbox vertical user origin 0.88, 0.15 size 0.025, 0.7");
+                            pScat.gnuplot("set colorbox vertical user origin 0.92, 0.07 size 0.02, 0.35");
                             pScat.legend().hide();
                             // Group by unique T
                             std::map<double,std::vector<SPt>> byT;
@@ -4622,7 +4633,7 @@ int main(int argc, char** argv) {
                 Plot2D p2; setup_analysis_plot(p2);
                 p2.gnuplot("set logscale x 10");
                 p2.xlabel("{/Helvetica-Oblique T}");
-                p2.ylabel("1/{/Helvetica-Oblique Y}_2  (participating modes)");
+                p2.ylabel("1/{/Helvetica-Oblique Y}_{2} (participating modes)");
                 p2.legend().hide();
                 p2.drawCurvesFilled(vT, vInvLo, vInvHi)
                     .fillColor("#377eb8").fillIntensity(0.3).fillTransparent()
@@ -4705,7 +4716,7 @@ int main(int argc, char** argv) {
                 Plot2D pS; setup_analysis_plot(pS);
                 if (log_temp) pS.gnuplot("set logscale x 10");
                 pS.xlabel("{/Helvetica-Oblique T}");
-                pS.ylabel("Shannon entropy  {/Helvetica-Oblique S}");
+                pS.ylabel("Shannon entropy {/Helvetica-Oblique S}");
                 pS.legend().hide();
                 pS.drawCurvesFilled(vT, vSlo, vShi)
                     .fillColor("#4daf4a").fillIntensity(0.3).fillTransparent()
@@ -4715,7 +4726,7 @@ int main(int argc, char** argv) {
                 Plot2D pG; setup_analysis_plot(pG);
                 if (log_temp) pG.gnuplot("set logscale x 10");
                 pG.xlabel("{/Helvetica-Oblique T}");
-                pG.ylabel("Gini coefficient  {/Helvetica-Oblique G}");
+                pG.ylabel("Gini coefficient {/Helvetica-Oblique G}");
                 pG.legend().hide();
                 pG.drawCurvesFilled(vT, vGlo, vGhi)
                     .fillColor("#ff7f00").fillIntensity(0.3).fillTransparent()
@@ -4756,7 +4767,7 @@ int main(int argc, char** argv) {
                 Plot2D plot; setup_analysis_plot(plot);
                 if (log_temp) plot.gnuplot("set logscale x 10");
                 plot.xlabel("{/Helvetica-Oblique T}");
-                plot.ylabel("{/Helvetica-Oblique A}_E (non-self-averaging)");
+                plot.ylabel("{/Helvetica-Oblique A}_{E} (non-self-averaging)");
                 plot.legend().hide();
                 plot.drawCurvesFilled(vT, vLo, vHi)
                     .fillColor("#a65628").fillIntensity(0.3).fillTransparent()
@@ -4796,7 +4807,7 @@ int main(int argc, char** argv) {
                 Plot2D plot; setup_analysis_plot(plot);
                 if (log_temp) plot.gnuplot("set logscale x 10");
                 plot.xlabel("{/Helvetica-Oblique T}");
-                plot.ylabel("{/Symbol t}_E  (decorrelation time)");
+                plot.ylabel("{/Symbol t}_{E} (decorrelation time)");
                 plot.legend().hide();
                 plot.drawCurvesFilled(vT, vLo, vHi)
                     .fillColor("#e41a1c").fillIntensity(0.3).fillTransparent()
@@ -4842,11 +4853,11 @@ int main(int argc, char** argv) {
                 plot.drawCurvesFilled(vT, v2lo, v2hi)
                     .fillColor("#377eb8").fillIntensity(0.3).fillTransparent()
                     .lineColor("#377eb8").lineWidth(0).labelNone();
-                plot.drawCurve(vT, v2).lineColor("#377eb8").lineWidth(2).label("E_2/N");
+                plot.drawCurve(vT, v2).lineColor("#377eb8").lineWidth(2).label("{/Helvetica-Oblique E}_2/{/Helvetica-Oblique N}");
                 plot.drawCurvesFilled(vT, v4lo, v4hi)
                     .fillColor("#e41a1c").fillIntensity(0.3).fillTransparent()
                     .lineColor("#e41a1c").lineWidth(0).labelNone();
-                plot.drawCurve(vT, v4).lineColor("#e41a1c").lineWidth(2).label("E_4/N");
+                plot.drawCurve(vT, v4).lineColor("#e41a1c").lineWidth(2).label("{/Helvetica-Oblique E}_4/{/Helvetica-Oblique N}");
                 Figure fig = {{plot}};
                 Canvas canvas = {{fig}};
                 canvas.size(900, 600);
@@ -4860,7 +4871,7 @@ int main(int argc, char** argv) {
         {
             // Plot all available autocorrelation files
             Plot2D plot; setup_analysis_plot(plot);
-            plot.xlabel("{/Symbol t}  (lag)");
+            plot.xlabel("{/Symbol t} (lag)");
             plot.ylabel("{/Helvetica-Oblique C}({/Symbol t})");
             const char* acols[] = {"#e41a1c","#377eb8","#4daf4a","#984ea3","#ff7f00"};
             int nac = 0;
@@ -4887,7 +4898,7 @@ int main(int argc, char** argv) {
                 }
                 fclose(f);
                 if (!vlags.empty()) {
-                    char lbl[64]; snprintf(lbl, sizeof(lbl), "T=%.3f", temps[ti]);
+                    char lbl[64]; snprintf(lbl, sizeof(lbl), "{/Helvetica-Oblique T} = %.3f", temps[ti]);
                     plot.drawCurve(vlags, vC)
                         .lineColor(acols[nac % 5]).lineWidth(2).label(lbl);
                     nac++;
@@ -4908,7 +4919,7 @@ int main(int argc, char** argv) {
             const char* tnames_mm[] = { "hot", "mid", "cold" };
             const char* ecols[] = {"#e41a1c", "#4daf4a", "#377eb8"};
             Plot2D plot; setup_analysis_plot(plot);
-            plot.xlabel("Eigenvalue index");
+            plot.xlabel("Eigenvalue index {/Helvetica-Oblique k}");
             plot.ylabel("{/Symbol l} / {/Helvetica-Oblique N}");
             plot.gnuplot("set logscale y 10");
             int nec = 0;
@@ -4947,8 +4958,8 @@ int main(int argc, char** argv) {
             const char* mfnames[] = { "hot", "cold" };
             const char* mfcols[] = { "#e41a1c", "#377eb8" };
             Plot2D plot; setup_analysis_plot(plot);
-            plot.xlabel("{/Symbol w}_k");
-            plot.ylabel("<{/Helvetica-Oblique I}_k>");
+            plot.xlabel("{/Symbol w}_{k}");
+            plot.ylabel("<{/Helvetica-Oblique I}_{k}>");
             int nmc = 0;
             for (int tt = 0; tt < 2; tt++) {
                 char mffile[512];
@@ -4966,7 +4977,7 @@ int main(int argc, char** argv) {
                 }
                 fclose(f);
                 if (!vw.empty()) {
-                    char lbl[64]; snprintf(lbl, sizeof(lbl), "T=%s", mfnames[tt]);
+                    char lbl[64]; snprintf(lbl, sizeof(lbl), "{/Helvetica-Oblique T} = %s", mfnames[tt]);
                     plot.drawPoints(vw, vI)
                         .lineColor(mfcols[tt]).pointType(7).pointSize(0.8).label(lbl);
                     nmc++;

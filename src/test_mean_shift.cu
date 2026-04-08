@@ -75,8 +75,8 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMalloc(&d_g2, n * sizeof(cuDoubleComplex)));
         generate_g2(d_g2, N, J, 42);
 
-        // g2 is fully-connected (no FMC): all off-diag are non-zero
-        long long n_surviving = n_pairs(N);  // N*(N-1)/2
+        // g2 is fully-connected (no FMC): all entries with i<=j are non-zero
+        long long n_surviving = n_pairs(N);  // N*(N+1)/2
 
         // Rescale
         rescale_g2(d_g2, N, J, n_surviving);

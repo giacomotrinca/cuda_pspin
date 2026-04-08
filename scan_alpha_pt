@@ -1,0 +1,139 @@
+#!/bin/bash
+
+# Sweep over alpha values, launching scan_samples_pt for each one
+# then running analysis_pt on the results.
+
+# Default parameters (forwarded to scan_samples_pt)
+SIZE=18
+TMAX=1.6
+TMIN=0.005
+NT=30
+J=2.0
+R="inf"
+ALPHA0=0.5
+ITER=20
+NREP=100
+NSAMPLES=10
+DEV=0
+SPARSE=0
+FMC=2
+GAMMA=""
+PT_FREQ=64
+SAVE_FREQ=64
+LOG_TEMP=1
+COMPRESS=0
+SHOW_OUTPUT=2
+
+# Alpha grid (space-separated list)
+ALPHA_LIST="0.0 0.25 0.5 0.75 1.0"
+NBINS=80
+DO_PLOT=1
+DO_ANALYSIS=1
+
+# Parse arguments
+for arg in "$@"; do
+    case "$arg" in
+        --size=*)      SIZE="${arg#*=}" ;;
+        --tmax=*)      TMAX="${arg#*=}" ;;
+        --tmin=*)      TMIN="${arg#*=}" ;;
+        --nt=*)        NT="${arg#*=}" ;;
+        --J=*)         J="${arg#*=}" ;;
+        --R=*)         R="${arg#*=}" ;;
+        --alpha0=*)    ALPHA0="${arg#*=}" ;;
+        --iter=*)      ITER="${arg#*=}" ;;
+        --nrep=*)      NREP="${arg#*=}" ;;
+        --nsamples=*)  NSAMPLES="${arg#*=}" ;;
+        --dev=*)       DEV="${arg#*=}" ;;
+        --sparse)      SPARSE=1 ;;
+        --fmc=*)       FMC="${arg#*=}" ;;
+        --gamma=*)     GAMMA="${arg#*=}" ;;
+        --pt_freq=*)   PT_FREQ="${arg#*=}" ;;
+        --save_freq=*) SAVE_FREQ="${arg#*=}" ;;
+        --log-temp)    LOG_TEMP=1 ;;
+        --show-output=*) SHOW_OUTPUT="${arg#*=}" ;;
+        --compress)    COMPRESS=1 ;;
+        --alphas=*)    ALPHA_LIST="${arg#*=}" ;;
+        --nbins=*)     NBINS="${arg#*=}" ;;
+        --plot)        DO_PLOT=1 ;;
+        --no-analysis) DO_ANALYSIS=0 ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Sweep over alpha values, running scan_samples_pt + analysis_pt for each."
+            echo ""
+            echo "Alpha grid:"
+            echo "  --alphas='0.0 0.2 0.5 0.8 1.0'   Space-separated list of alpha values"
+            echo ""
+            echo "Analysis options:"
+            echo "  --nbins=N       Number of bins for analysis (default: $NBINS)"
+            echo "  --plot           Generate plots during analysis"
+            echo "  --no-analysis    Skip analysis step (simulation only)"
+            echo ""
+            echo "Simulation options (forwarded to scan_samples_pt):"
+            echo "  --size=N --tmax=T --tmin=T --nt=N --J=J --R=R --alpha0=A0"
+            echo "  --iter=K --nrep=R --nsamples=S --dev=D --sparse --fmc=M"
+            echo "  --gamma=G --pt_freq=P --save_freq=K --log-temp --compress"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
+# Build shared flags for scan_samples_pt
+FLAGS="--size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --R=$R --alpha0=$ALPHA0"
+FLAGS="$FLAGS --iter=$ITER --nrep=$NREP --nsamples=$NSAMPLES --dev=$DEV --fmc=$FMC"
+FLAGS="$FLAGS --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ"
+[ "$LOG_TEMP" -eq 1 ] && FLAGS="$FLAGS --log-temp"
+[ "$SPARSE" -eq 1 ]   && FLAGS="$FLAGS --sparse"
+[ "$COMPRESS" -eq 1 ]  && FLAGS="$FLAGS --compress"
+[ -n "$GAMMA" ]        && FLAGS="$FLAGS --gamma=$GAMMA"
+
+# Compute J0 for analysis
+if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
+    J0=0.0
+else
+    J0=$(awk "BEGIN {printf \"%.6g\", $J / $R}")
+fi
+
+NALPHA=$(echo "$ALPHA_LIST" | wc -w)
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║         p-Spin 2+4 :: Alpha Sweep                ║"
+echo "╚══════════════════════════════════════════════════╝"
+printf "  %-22s %s\n" "alpha values" "$ALPHA_LIST"
+printf "  %-22s %s\n" "# alpha points" "$NALPHA"
+printf "  %-22s %s\n" "N" "$SIZE"
+printf "  %-22s %s\n" "R" "$R"
+printf "  %-22s %s\n" "alpha0" "$ALPHA0"
+printf "  %-22s %s\n" "nsamples" "$NSAMPLES"
+echo ""
+
+AIDX=0
+for ALPHA in $ALPHA_LIST; do
+    AIDX=$((AIDX + 1))
+    echo "================================================================"
+    echo "  Alpha $AIDX/$NALPHA :  alpha = $ALPHA"
+    echo "================================================================"
+
+    # --- Simulation ---
+    ./scan_samples_pt $FLAGS --alpha=$ALPHA --show-output=$SHOW_OUTPUT
+
+    # --- Analysis ---
+    if [ "$DO_ANALYSIS" -eq 1 ]; then
+        echo ""
+        echo "  Running analysis for alpha=$ALPHA ..."
+        ANALYSIS_FLAGS="-N $SIZE -NT $NT -nrep $NREP -alpha $ALPHA -J0 $J0 -J $J -alpha0 $ALPHA0 -nbins $NBINS"
+        [ "$SPARSE" -eq 1 ] && ANALYSIS_FLAGS="$ANALYSIS_FLAGS --sparse"
+        [ "$DO_PLOT" -eq 1 ] && ANALYSIS_FLAGS="$ANALYSIS_FLAGS --plot"
+        ./bin/analysis_pt $ANALYSIS_FLAGS
+    fi
+
+    echo ""
+done
+
+echo "================================================================"
+echo "  Alpha sweep complete: $NALPHA points."
+echo "================================================================"

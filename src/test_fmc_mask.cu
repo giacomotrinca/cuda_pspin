@@ -141,8 +141,7 @@ int main(int argc, char** argv) {
     cuDoubleComplex* h_g2_init = new cuDoubleComplex[(long long)N * N];
     for (int i = 0; i < N; i++)
         for (int j = 0; j < N; j++)
-            h_g2_init[i * N + j] = (i != j) ? make_cuDoubleComplex(1.0, 0.0)
-                                             : make_cuDoubleComplex(0.0, 0.0);
+            h_g2_init[i * N + j] = make_cuDoubleComplex(1.0, 0.0);
     CUDA_CHECK(cudaMemcpy(d_g2, h_g2_init, (long long)N * N * sizeof(cuDoubleComplex),
                           cudaMemcpyHostToDevice));
     apply_fmc_g2(d_g2, N, d_omega, gamma);
@@ -153,9 +152,9 @@ int main(int argc, char** argv) {
 
     int g2_mismatch = 0;
     for (int i = 0; i < N; i++)
-        for (int j = i + 1; j < N; j++) {
+        for (int j = i; j < N; j++) {
             bool gpu_zero = (cuCreal(h_g2_gpu[i * N + j]) == 0.0);
-            bool cpu_zero = (fabs(h_omega[i] - h_omega[j]) > gamma);
+            bool cpu_zero = (i != j) && (fabs(h_omega[i] - h_omega[j]) > gamma);
             if (gpu_zero != cpu_zero) g2_mismatch++;
         }
 

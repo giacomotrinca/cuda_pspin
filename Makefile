@@ -1,8 +1,8 @@
 # p-Spin 2+4 -- CUDA build
 # Default: V100S (sm_70).   Use  make ... visnu=1  for GTX 680 (sm_30).
+#                            Use  make ... kraken=1 for Tesla K20c (sm_35).
 
 NVCC    = nvcc
-CXX     = g++
 
 # shared library objects (everything except the three main programs)
 LIB_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
@@ -16,17 +16,25 @@ LIB_ALL_OBJ = obj/config.o obj/disorder.o obj/hamiltonian.o obj/mc.o obj/spins.o
 
 ifdef visnu
   ARCH = sm_30
+else ifdef kraken
+  ARCH = sm_35
 else
   ARCH = sm_70
 endif
 
-NVFLAGS = -std=c++11 -arch=$(ARCH) -O3 -Iinclude -DNDEBUG
+ifdef kraken
+  CXX = $(HOME)/gcc7/bin/g++
+else
+  CXX = g++
+endif
+
+NVFLAGS = -std=c++11 -arch=$(ARCH) -O3 -Iinclude -DNDEBUG -Wno-deprecated-gpu-targets
 CXFLAGS = -std=c++17 -O3 -Wall -DNDEBUG -Iinclude/sciplot
 LIBS    = -lcurand -lm
 
 .PHONY: all clean mc sa pt pts analysis_mc analysis_sa analysis_pt bench bench_plot bench_pt smcu_test \
        test_quartet test_spherical test_delta_e test_inf_temp test_detailed_balance \
-       test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift tests
+       test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift test_fmc_survivors tests
 
 all: dirs bin/pspin24 bin/simulated_annealing bin/parallel_tempering \
      bin/analysis bin/analysis_sa bin/analysis_pt
@@ -54,9 +62,10 @@ test_fmc_mask:         dirs bin/test_fmc_mask
 test_replica_exchange: dirs bin/test_replica_exchange
 test_sparse_dense:     dirs bin/test_sparse_dense
 test_mean_shift:       dirs bin/test_mean_shift
+test_fmc_survivors:    dirs bin/test_fmc_survivors
 
 tests: test_quartet test_spherical test_delta_e test_inf_temp test_detailed_balance \
-       test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift
+       test_fmc_mask test_replica_exchange test_sparse_dense test_mean_shift test_fmc_survivors
 	@echo "All test binaries built."
 
 dirs:
@@ -112,6 +121,9 @@ bin/test_sparse_dense: obj/test_sparse_dense.o $(LIB_SPARSE_OBJ) | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
 bin/test_mean_shift: obj/test_mean_shift.o obj/disorder.o | dirs
+	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
+
+bin/test_fmc_survivors: obj/test_fmc_survivors.o obj/disorder.o | dirs
 	$(NVCC) $(NVFLAGS) -o $@ $^ $(LIBS)
 
 # --- C++ analysis ---

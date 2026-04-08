@@ -2,6 +2,9 @@
 #define CONFIG_H
 
 #include <cstdint>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
 
 struct SimConfig {
     int save_freq;          // save every save_freq iterations
@@ -43,5 +46,42 @@ inline SimConfig default_config() {
 }
 
 SimConfig parse_args(int argc, char** argv);
+
+// Format a clean float tag for directory names (removes trailing zeros, keeps one decimal)
+// e.g. 0.500000 -> "0.50", 1.000000 -> "1.00", 0.333333 -> "0.333333"
+inline void fmt_param(char* buf, int sz, double v) {
+    snprintf(buf, sz, "%.6g", v);
+    // Ensure at least one decimal point for readability
+    if (!strchr(buf, '.') && !strchr(buf, 'e')) {
+        int n = (int)strlen(buf);
+        if (n + 3 < sz) { buf[n] = '.'; buf[n+1] = '0'; buf[n+2] = '\0'; }
+    }
+}
+
+// Build parameter-aware directory name for data:
+//   data/{prefix}_N{N}_a{alpha}_R{R}_a0{alpha0}_NT{NT}_NR{nrep}_S{label}
+// For analysis (label < 0):
+//   analysis/{prefix}_N{N}_a{alpha}_R{R}_a0{alpha0}_NT{NT}_NR{nrep}
+inline void make_run_dir(char* buf, int sz,
+                         const char* base,   // "data" or "analysis"
+                         const char* prefix,  // "PT" or "PTS"
+                         int N, double alpha, double J, double J0, double alpha0,
+                         int NT, int nrep, int label) {
+    char sa[32], sR[32], sa0[32];
+    fmt_param(sa,  sizeof(sa),  alpha);
+    fmt_param(sa0, sizeof(sa0), alpha0);
+    if (J0 == 0.0)
+        snprintf(sR, sizeof(sR), "inf");
+    else {
+        double R = J / J0;
+        fmt_param(sR, sizeof(sR), R);
+    }
+    if (label >= 0)
+        snprintf(buf, sz, "%s/%s_N%d_a%s_R%s_a0%s_NT%d_NR%d_S%d",
+                 base, prefix, N, sa, sR, sa0, NT, nrep, label);
+    else
+        snprintf(buf, sz, "%s/%s_N%d_a%s_R%s_a0%s_NT%d_NR%d",
+                 base, prefix, N, sa, sR, sa0, NT, nrep);
+}
 
 #endif

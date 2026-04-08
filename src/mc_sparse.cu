@@ -452,7 +452,7 @@ MCStateSparse mc_sparse_init(const SimConfig& cfg) {
                                   cudaMemcpyDeviceToHost));
             state.n_pairs_active = 0;
             for (int i = 0; i < N; i++)
-                for (int j = i + 1; j < N; j++)
+                for (int j = i; j < N; j++)
                     if (h_g2[i * N + j].x != 0.0 || h_g2[i * N + j].y != 0.0)
                         state.n_pairs_active++;
             delete[] h_g2;

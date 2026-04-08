@@ -16,8 +16,8 @@
 // FMC is selected and stored as a single-bit mask (0x0 if none passes).
 #define N_G4_CHANNELS 1
 
-// Generate the 2-body couplings g2[i*N + j] for i < j
-// Stored as upper-triangular in a flat N*N array.
+// Generate the 2-body couplings g2[i*N + j] for i <= j (including diagonal i=j)
+// Stored as symmetric in a flat N*N array.
 // Generated with unit variance; call rescale_g2 after FMC filter to set
 // Var = J^2 * N / n_surviving.
 void generate_g2(cuDoubleComplex* d_g2, int N, double J, unsigned long long seed);
@@ -38,9 +38,9 @@ inline long long n_g4_total(int N) {
     return n_quartets(N);
 }
 
-// Number of 2-body terms C(N,2)
+// Number of 2-body terms: N*(N+1)/2 (includes diagonal i=j)
 inline long long n_pairs(int N) {
-    return (long long)N * (N - 1) / 2;
+    return (long long)N * (N + 1) / 2;
 }
 
 // Rescale g2 couplings: sigma = J * sqrt(N / n_surviving)

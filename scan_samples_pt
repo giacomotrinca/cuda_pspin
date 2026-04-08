@@ -22,7 +22,7 @@ DEV=0
 FMC=2 # 0=FullyConnected, 1=comb, 2=uniform
 GAMMA=""
 SHOW_OUTPUT=0
-LOG_TEMP=0
+LOG_TEMP=1
 SPARSE=0
 COMPRESS=0
 
@@ -89,6 +89,22 @@ else
     J0=$(awk "BEGIN {printf \"%.6g\", $J / $R}")
 fi
 
+# Format a float for directory names (matches C fmt_param: %.6g with decimal point)
+fmt_param() { awk "BEGIN { s=sprintf(\"%.6g\", $1); if (index(s,\".\")==0 && index(s,\"e\")==0) s=s\".0\"; print s }"; }
+ALPHA_TAG=$(echo "$ALPHA" | fmt_param)
+ALPHA0_TAG=$(echo "$ALPHA0" | fmt_param)
+if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
+    R_TAG="inf"
+else
+    R_TAG=$(awk "BEGIN {printf \"%.6g\", $J / $J0}" | fmt_param)
+fi
+
+# Build data directory name for a given sample label
+# Usage: make_datadir PREFIX LABEL
+make_datadir() {
+    echo "data/${1}_N${SIZE}_a${ALPHA_TAG}_R${R_TAG}_a0${ALPHA0_TAG}_NT${NT}_NR${NREP}_S${2}"
+}
+
 SWEEPS=$((1 << ITER))
 TOTAL_REPLICAS=$((NT * NREP))
 
@@ -137,9 +153,9 @@ for S in $(seq 0 $((NSAMPLES - 1))); do
     # Compress data if requested
     if [ "$COMPRESS" -eq 1 ]; then
         if [ "$SPARSE" -eq 1 ]; then
-            DATADIR="data/PTS_N${SIZE}_NT${NT}_NR${NREP}_S${S}"
+            DATADIR=$(make_datadir "PTS" "$S")
         else
-            DATADIR="data/PT_N${SIZE}_NT${NT}_NR${NREP}_S${S}"
+            DATADIR=$(make_datadir "PT" "$S")
         fi
         if [ -d "$DATADIR" ]; then
             echo "  Compressing $DATADIR ..."
