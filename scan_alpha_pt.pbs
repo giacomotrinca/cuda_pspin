@@ -1,0 +1,108 @@
+#!/bin/bash
+#PBS -N RL2+4
+#PBS -l select=1:ncpus=32:ngpus=1:mem=8gb
+#PBS -q gpuq-longrun
+#PBS -o scan_alpha_pt.out
+#PBS -e scan_alpha_pt.err
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  p-Spin 2+4  ──  PBS Alpha Sweep (parallel tempering)      ║
+# ║                                                             ║
+# ║  Usage:                                                     ║
+# ║    qsub scan_alpha_pt.pbs                                   ║
+# ║    qsub -v ALPHAS="0.0 0.25 0.5",SIZE=24 scan_alpha_pt.pbs ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+# ── Project directory ────────────────────────────────────────
+cd "$PBS_O_WORKDIR"
+echo "Working directory: $(pwd)"
+echo ""
+
+# ── Simulation parameters (override via qsub -v) ────────────
+SIZE=${SIZE:-18}
+
+# Rename job to include SIZE (PBS directives can't expand variables)
+[ -n "$PBS_JOBID" ] && qalter -N "RL2+4-N${SIZE}" "$PBS_JOBID" 2>/dev/null
+
+TMAX=${TMAX:-1.6}
+TMIN=${TMIN:-0.005}
+NT=${NT:-30}
+J=${J:-2.0}
+R=${R:-inf}
+ALPHA0=${ALPHA0:-0.5}
+ITER=${ITER:-22}
+NREP=${NREP:-100}
+NSAMPLES=${NSAMPLES:-50}
+FMC=${FMC:-2}
+GAMMA=${GAMMA:-}
+PT_FREQ=${PT_FREQ:-64}
+SAVE_FREQ=${SAVE_FREQ:-64}
+LOG_TEMP=${LOG_TEMP:-1}
+COMPRESS=${COMPRESS:-0}
+SHOW_OUTPUT=${SHOW_OUTPUT:-0}
+SPARSE=${SPARSE:-1}
+
+# Alpha grid (space-separated)
+ALPHAS=${ALPHAS:-"0.0 0.25 0.5 0.75 1.0"}
+NBINS=${NBINS:-80}
+DO_PLOT=${DO_PLOT:-0}          # off by default on cluster (no display)
+DO_ANALYSIS=${DO_ANALYSIS:-1}
+
+# ── Build flags for scan_samples_pt ─────────────────────────
+FLAGS="--size=$SIZE --tmax=$TMAX --tmin=$TMIN --nt=$NT --J=$J --R=$R --alpha0=$ALPHA0"
+FLAGS="$FLAGS --iter=$ITER --nrep=$NREP --nsamples=$NSAMPLES --dev=0 --fmc=$FMC"
+FLAGS="$FLAGS --pt_freq=$PT_FREQ --save_freq=$SAVE_FREQ"
+[ "$LOG_TEMP" -eq 1 ] && FLAGS="$FLAGS --log-temp"
+[ "$SPARSE" -eq 1 ]   && FLAGS="$FLAGS --sparse"
+[ "$COMPRESS" -eq 1 ]  && FLAGS="$FLAGS --compress"
+[ -n "$GAMMA" ]        && FLAGS="$FLAGS --gamma=$GAMMA"
+
+# Compute J0 for analysis
+if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
+    J0=0.0
+else
+    J0=$(awk "BEGIN {printf \"%.6g\", $J / $R}")
+fi
+
+# ── Alpha sweep ──────────────────────────────────────────────
+NALPHA=$(echo "$ALPHAS" | wc -w)
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║       p-Spin 2+4 :: Alpha Sweep (PBS)            ║"
+echo "╚══════════════════════════════════════════════════╝"
+printf "  %-22s %s\n" "alpha values" "$ALPHAS"
+printf "  %-22s %s\n" "# alpha points" "$NALPHA"
+printf "  %-22s %s\n" "N" "$SIZE"
+printf "  %-22s %s\n" "R" "$R"
+printf "  %-22s %s\n" "alpha0" "$ALPHA0"
+printf "  %-22s %s\n" "nsamples" "$NSAMPLES"
+printf "  %-22s %s\n" "ARCH" "$ARCH"
+printf "  %-22s %s\n" "PBS Job ID" "${PBS_JOBID:-local}"
+echo ""
+
+AIDX=0
+for ALPHA in $ALPHAS; do
+    AIDX=$((AIDX + 1))
+    echo "================================================================"
+    echo "  Alpha $AIDX/$NALPHA :  alpha = $ALPHA"
+    echo "================================================================"
+
+    # --- Simulation ---
+    ./scan_samples_pt $FLAGS --alpha=$ALPHA --show-output=$SHOW_OUTPUT
+
+    # --- Analysis ---
+    if [ "$DO_ANALYSIS" -eq 1 ]; then
+        echo ""
+        echo "  Running analysis for alpha=$ALPHA ..."
+        ANALYSIS_FLAGS="-N $SIZE -NT $NT -nrep $NREP -alpha $ALPHA -J0 $J0 -J $J -alpha0 $ALPHA0 -nbins $NBINS"
+        [ "$SPARSE" -eq 1 ] && ANALYSIS_FLAGS="$ANALYSIS_FLAGS --sparse"
+        [ "$DO_PLOT" -eq 1 ] && ANALYSIS_FLAGS="$ANALYSIS_FLAGS --plot"
+        ./bin/analysis_pt $ANALYSIS_FLAGS
+    fi
+
+    echo ""
+done
+
+echo "================================================================"
+echo "  Alpha sweep complete: $NALPHA points.  (Job: ${PBS_JOBID:-local})"
+echo "================================================================"
