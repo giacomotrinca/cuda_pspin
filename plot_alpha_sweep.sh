@@ -40,7 +40,7 @@ PREFIX="PT"
 [ "$SPARSE" -eq 1 ] && PREFIX="PTS"
 
 # Format float for directory names (same logic as C fmt_param)
-fmt_param() { awk "BEGIN { s=sprintf(\"%.6g\", $1); if (index(s,\".\")==0 && index(s,\"e\")==0) s=s\".0\"; print s }"; }
+fmt_param() { awk '{ s=sprintf("%.6g", $1); if (index(s,".")==0 && index(s,"e")==0) s=s".0"; print s }'; }
 
 ALPHA0_TAG=$(echo "$ALPHA0" | fmt_param)
 if [ "$R" = "inf" ] || [ "$R" = "Inf" ] || [ "$R" = "INF" ]; then
